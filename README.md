@@ -29,7 +29,7 @@ I had some extra time, so I decided to patch stuff up.
 
 Apart from build system - mainly SDL integration.
 
-Now we have proper windowed mode support, integer scaling support, pillar-boxed non-integer scaling, pointer clamping (panning in 2D works now), and so on and so on.
+Now we have DPI awareness, proper windowed mode support, integer scaling support, pillar-boxed non-integer scaling, pointer clamping (panning in 2D works now), and so on and so on.
 
 I have also fixed a couple of crashes that upstream is yet to fix, and added a bit of polish so Steam Deck trackpads would work properly too.
 
