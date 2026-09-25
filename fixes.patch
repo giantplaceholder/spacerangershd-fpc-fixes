@@ -1,5 +1,5 @@
 diff --git a/BUILDING.md b/BUILDING.md
-index 92ef727..766c9b7 100644
+index 92ef727..89b3591 100644
 --- a/BUILDING.md
 +++ b/BUILDING.md
 @@ -2,14 +2,17 @@
@@ -168,7 +168,7 @@ index 1aca9ba..ea4ed19 100644
    // A device reset may have happened in Present itself. Never rebind the old
    // target handle: D3D11 has already freed its backend storage at this point.
 diff --git a/platform/GameWindow.pas b/platform/GameWindow.pas
-index 73fbd7a..ccd872a 100644
+index 73fbd7a..d54d395 100644
 --- a/platform/GameWindow.pas
 +++ b/platform/GameWindow.pas
 @@ -26,6 +26,9 @@ function GameKeyState(Key: Integer): SmallInt;
@@ -181,7 +181,7 @@ index 73fbd7a..ccd872a 100644
  function ShowGameCursor(Show: Boolean): Integer;
  procedure SetGameWindowTitle(const Title: UnicodeString);
  procedure MinimizeGameWindow;
-@@ -43,6 +46,8 @@ var
+@@ -43,12 +46,17 @@ var
    GameSDLWindow: PSDL_Window;
    GameSDLRenderer: PSDL_Renderer;
    GameTextureGeneration, GameTargetGeneration: LongInt;
@@ -190,7 +190,16 @@ index 73fbd7a..ccd872a 100644
  
  implementation
  
-@@ -103,6 +108,9 @@ begin
+ uses
+ {$IFDEF DARWIN}
+   GameCocoaCursor,
++{$ENDIF}
++{$IFDEF MSWINDOWS}
++  MMSystem,
+ {$ENDIF}
+   SysUtils,
+   Math,
+@@ -103,6 +111,9 @@ begin
  {$ENDIF}
  end;
  
@@ -200,10 +209,13 @@ index 73fbd7a..ccd872a 100644
  procedure InitializeGameVideo;
  var
    Driver: string;
-@@ -117,6 +125,25 @@ begin
+@@ -117,6 +128,28 @@ begin
        [exInvalidOp, exDenormalized, exZeroDivide, exOverflow, exUnderflow, exPrecision]
    );
    SDL_SetMainReady;
++{$IFDEF MSWINDOWS}
++  timeBeginPeriod(1);
++{$ENDIF}
 +{$IFDEF MSWINDOWS}
 +  // Points as SDL units; implies per-monitor awareness and ALLOW_HIGHDPI.
 +  // Do not also set SDL_WINDOWS_DPI_AWARENESS (that forces 1 unit = 1 pixel).
@@ -226,7 +238,7 @@ index 73fbd7a..ccd872a 100644
    CheckSDL(SDL_InitSubSystem(SDL_INIT_VIDEO or SDL_INIT_TIMER));
    // These desktop backends provide real global coordinates. Other backends
    // (notably Wayland) may return cached window coordinates from the same API.
-@@ -135,11 +162,14 @@ var
+@@ -135,11 +168,14 @@ var
    PreviousTarget: PSDL_Texture;
    TargetGeneration: LongInt;
    Created: Boolean;
@@ -241,7 +253,7 @@ index 73fbd7a..ccd872a 100644
    Created := GameSDLWindow = nil;
    if Created then
    begin
-@@ -173,11 +203,52 @@ begin
+@@ -173,11 +209,52 @@ begin
      end;
      SDL_StartTextInput;
    end;
@@ -299,7 +311,7 @@ index 73fbd7a..ccd872a 100644
    // Configure the window view, not an offscreen texture's view. SDL then maps
    // mouse events and the presented frame to the same logical resolution,
    // including Retina pixels; disabling this leaves SDL2-compat events scaled.
-@@ -187,10 +258,12 @@ begin
+@@ -187,10 +264,12 @@ begin
    CheckSDL(SDL_SetRenderTarget(GameSDLRenderer, nil));
    try
      CheckSDL(SDL_RenderSetLogicalSize(GameSDLRenderer, Width, Height));
@@ -312,7 +324,7 @@ index 73fbd7a..ccd872a 100644
    SDL_ShowCursor(Ord(CursorCount >= 0));
    if Created then
    begin
-@@ -302,6 +375,129 @@ begin
+@@ -302,6 +381,129 @@ begin
    OffsetY := Trunc((Height - LogicalHeight * Scale) / 2);
  end;
  
@@ -442,7 +454,7 @@ index 73fbd7a..ccd872a 100644
  function WindowPoint(X, Y: Integer): TPoint;
  var
    Scale: Double;
-@@ -419,8 +615,18 @@ begin
+@@ -419,8 +621,18 @@ begin
        SDL_MOUSEMOTION:
        begin
          Message.Message := WM_MOUSEMOVE;
@@ -462,7 +474,7 @@ index 73fbd7a..ccd872a 100644
          Exit;
        end;
        SDL_MOUSEBUTTONDOWN, SDL_MOUSEBUTTONUP:
-@@ -436,8 +642,18 @@ begin
+@@ -436,8 +648,18 @@ begin
            Inc(Message.Message)
          else if Event.Button.Clicks = 2 then
            Inc(Message.Message, 2);
@@ -482,7 +494,7 @@ index 73fbd7a..ccd872a 100644
          Exit;
        end;
        SDL_MOUSEWHEEL:
-@@ -521,7 +737,10 @@ procedure GetGameMouse(out Point: TPoint);
+@@ -521,7 +743,10 @@ procedure GetGameMouse(out Point: TPoint);
  var
    X, Y, WindowX, WindowY: Integer;
  begin
@@ -494,7 +506,7 @@ index 73fbd7a..ccd872a 100644
    begin
      // The original GetCursorPos + ScreenToClient also works outside the window.
      // SDL_GetMouseState stays at its last (clamped) position on mouse leave,
-@@ -531,7 +750,7 @@ begin
+@@ -531,7 +756,7 @@ begin
      Dec(X, WindowX);
      Dec(Y, WindowY);
    end
@@ -503,7 +515,7 @@ index 73fbd7a..ccd872a 100644
    begin
      // Without desktop coordinates, only the fact that the mouse is outside is
      // known. Keep its software image and hover hit tests outside the game too.
-@@ -545,18 +764,64 @@ begin
+@@ -545,18 +770,64 @@ begin
      Point := Types.Point(X, Y);
      Exit;
    end;
@@ -569,7 +581,7 @@ index 73fbd7a..ccd872a 100644
  end;
  
  function ShowGameCursor(Show: Boolean): Integer;
-@@ -698,5 +963,7 @@ finalization
+@@ -698,5 +969,7 @@ finalization
    begin
      SDL_DelEventWatch(WatchRendererReset, nil);
      SDL_QuitSubSystem(SDL_INIT_VIDEO or SDL_INIT_TIMER);
@@ -577,43 +589,11 @@ index 73fbd7a..ccd872a 100644
    end;
 +  SDL_Quit;
  end.
-diff --git a/platform/TlHelp32.pas b/platform/TlHelp32.pas
-new file mode 100644
-index 0000000..b7e1c01
---- /dev/null
-+++ b/platform/TlHelp32.pas
-@@ -0,0 +1,26 @@
-+{ Delphi-compatible unit name for Tool Help API.
-+  FPC already declares the API and types in unit Windows; this unit only
-+  aliases Delphi-style names so existing ``uses TlHelp32`` code type-checks
-+  against Windows.MODULEENTRY32 (same type identity, no duplicate records). }
-+unit TlHelp32;
-+
-+{$MODE DELPHI}
-+
-+interface
-+
-+uses
-+  Windows;
-+
-+type
-+  { Same type as Windows.MODULEENTRY32 — required for var-parameter matching. }
-+  TModuleEntry32 = MODULEENTRY32;
-+  PModuleEntry32 = ^TModuleEntry32;
-+  TProcessEntry32 = PROCESSENTRY32;
-+  PProcessEntry32 = ^TProcessEntry32;
-+
-+{ Constants and CreateToolhelp32Snapshot / Module32First / Module32Next /
-+  Process32First / Process32Next are provided by unit Windows. }
-+
-+implementation
-+
-+end.
 diff --git a/platform/SDL2.pas b/platform/SDL2.pas
-index 8f2fa50..8770529 100644
+index 8f2fa50..cbead7c 100644
 --- a/platform/SDL2.pas
 +++ b/platform/SDL2.pas
-@@ -175,8 +175,10 @@ function SDL_GetRenderDriverInfo(
+@@ -175,9 +175,12 @@ function SDL_GetRenderDriverInfo(
  procedure SDL_SetMainReady; cdecl; external SDL2Library;
  function SDL_InitSubSystem(Flags: Cardinal): Integer; cdecl; external SDL2Library;
  procedure SDL_QuitSubSystem(Flags: Cardinal); cdecl; external SDL2Library;
@@ -622,9 +602,11 @@ index 8f2fa50..8770529 100644
  function SDL_GetHint(Name: PAnsiChar): PAnsiChar; cdecl; external SDL2Library;
 +function SDL_SetHint(Name, Value: PAnsiChar): Integer; cdecl; external SDL2Library;
  function SDL_GetPerformanceFrequency: QWord; cdecl; external SDL2Library;
++function SDL_GetPerformanceCounter: QWord; cdecl; external SDL2Library;
  function SDL_GetCPUCount: Integer; cdecl; external SDL2Library;
  function SDL_GetSystemRAM: Integer; cdecl; external SDL2Library;
-@@ -213,18 +215,25 @@ procedure SDL_SetWindowBordered(
+ procedure SDL_free(Data: Pointer); cdecl; external SDL2Library;
+@@ -213,18 +216,25 @@ procedure SDL_SetWindowBordered(
  ); cdecl; external SDL2Library;
  procedure SDL_SetWindowSize(Window: PSDL_Window; W, H: Integer); cdecl; external SDL2Library;
  procedure SDL_GetWindowSize(Window: PSDL_Window; out W, H: Integer); cdecl; external SDL2Library;
@@ -650,7 +632,7 @@ index 8f2fa50..8770529 100644
  function SDL_GetCurrentDisplayMode(
      Display: Integer;
      out Value: TSDL_DisplayMode
-@@ -235,6 +244,9 @@ function SDL_CreateRenderer(
+@@ -235,6 +245,9 @@ function SDL_CreateRenderer(
      Flags: Cardinal
  ): PSDL_Renderer; cdecl; external SDL2Library;
  procedure SDL_DestroyRenderer(Renderer: PSDL_Renderer); cdecl; external SDL2Library;
@@ -660,7 +642,7 @@ index 8f2fa50..8770529 100644
  function SDL_RenderSetLogicalSize(
      Renderer: PSDL_Renderer;
      W, H: Integer
-@@ -268,6 +280,7 @@ function SDL_SetRenderTarget(
+@@ -268,6 +281,7 @@ function SDL_SetRenderTarget(
      Texture: PSDL_Texture
  ): Integer; cdecl; external SDL2Library;
  function SDL_GetRenderTarget(Renderer: PSDL_Renderer): PSDL_Texture; cdecl; external SDL2Library;
@@ -669,10 +651,18 @@ index 8f2fa50..8770529 100644
      Renderer: PSDL_Renderer;
      Rect: PSDL_Rect
 diff --git a/source/GR_Main.pas b/source/GR_Main.pas
-index 6bbf02f..9f084fc 100644
+index 6bbf02f..8520ad0 100644
 --- a/source/GR_Main.pas
 +++ b/source/GR_Main.pas
-@@ -2392,7 +2392,7 @@ var
+@@ -1094,6 +1094,7 @@ var
+   RequestedRefreshRate: Integer = 0;
+ 
+   PresentWithoutLimit: Boolean = False;
++  LastPresentationQpc: QWord = 0;
+ 
+   DisableHardwareVertexProcessing: Boolean = False;
+ 
+@@ -2392,7 +2393,7 @@ var
      if Length(Prefix) > Length(Path) then
        Exit;
      CharacterIndex := 1;
@@ -681,7 +671,7 @@ index 6bbf02f..9f084fc 100644
      while CharacterIndex < CharacterCount do
      begin
        if Prefix[CharacterIndex] <> Path[CharacterIndex] then
-@@ -2562,7 +2562,7 @@ end;
+@@ -2562,7 +2563,7 @@ end;
  constructor TCCInterface.Create;
  begin
    inherited Create;
@@ -690,7 +680,7 @@ index 6bbf02f..9f084fc 100644
    Randomize;
    Buffer := TBufEC.Create;
    CommitSnapshot(CreateEmptySnapshot);
-@@ -4570,8 +4570,8 @@ begin
+@@ -4570,8 +4571,8 @@ begin
      end
      else
      begin
@@ -701,7 +691,7 @@ index 6bbf02f..9f084fc 100644
      end;
      Bounds.Right := Bounds.Left + Width;
      Bounds.Bottom := Bounds.Top + Height;
-@@ -4854,11 +4854,11 @@ begin
+@@ -4854,11 +4855,11 @@ begin
      ModuleName := ' (1 core)'
    else
      ModuleName := WideString(' (' + IntToStr(Count) + ' cores)');
@@ -715,7 +705,7 @@ index 6bbf02f..9f084fc 100644
            + ' MHz'
    );
    MemoryStatus.Length := SizeOf(MemoryStatus);
-@@ -4989,7 +4989,7 @@ begin
+@@ -4989,7 +4990,7 @@ begin
        GlobalCache.ResidentByteLimit := $18000000
      else
        GlobalCache.ResidentByteLimit :=
@@ -724,7 +714,7 @@ index 6bbf02f..9f084fc 100644
    AppendLogLineThreadSafe('Cache Size=' + IntToStr(GlobalCache.ResidentByteLimit div 1024) + ' KB');
    if UserSettingsConfig.CountParams('Brightness') > 0 then
      DisplayBrightness :=
-@@ -5452,7 +5452,11 @@ begin
+@@ -5452,7 +5453,11 @@ begin
    with Direct3DPresentParameters do
    begin
      System.FillChar(Pointer(@Direct3DPresentParameters)^, SizeOf(Direct3DPresentParameters), 0);
@@ -737,7 +727,7 @@ index 6bbf02f..9f084fc 100644
      DeviceWindow := MainWindowHandle;
      if DisableTripleBuffer then
        BackBufferCount := 1
-@@ -5465,6 +5469,16 @@ begin
+@@ -5465,6 +5470,16 @@ begin
        if VSyncEnabled then
          PresentationInterval := D3DPRESENT_INTERVAL_DEFAULT;
        SwapEffect := D3DSWAPEFFECT_DISCARD;
@@ -754,7 +744,7 @@ index 6bbf02f..9f084fc 100644
      end
      else
      begin
-@@ -5895,7 +5909,7 @@ begin
+@@ -5895,7 +5910,7 @@ begin
    HighInput := HighInput - (1 - Level) * (0.4 * Contrast);
    LowIndex := Round(LowInput * 255);
    HighIndex := Round(HighInput * 255);
@@ -763,7 +753,7 @@ index 6bbf02f..9f084fc 100644
    for Index := 0 to LowIndex - 1 do
    begin
      Ramp.Red[Index] := Value;
-@@ -5908,7 +5922,7 @@ begin
+@@ -5908,7 +5923,7 @@ begin
    begin
      if (Index >= 0) and (Index <= 255) then
      begin
@@ -772,7 +762,7 @@ index 6bbf02f..9f084fc 100644
        if Value < 0 then
          Value := 0
        else if Value > 65535 then
-@@ -5919,7 +5933,7 @@ begin
+@@ -5919,7 +5934,7 @@ begin
      end;
      Level := Level + Step;
    end;
@@ -781,7 +771,7 @@ index 6bbf02f..9f084fc 100644
    for Index := HighIndex to 255 do
    begin
      Ramp.Red[Index] := Value;
-@@ -5986,17 +6000,30 @@ begin
+@@ -5986,17 +6001,30 @@ begin
            Callback(Msg.message, Msg.wParam, Msg.lParam);
        end;
        Stage := 11;
@@ -814,7 +804,7 @@ index 6bbf02f..9f084fc 100644
      end;
    end;
  end;
-@@ -6114,7 +6141,10 @@ begin
+@@ -6114,7 +6142,10 @@ begin
      end;
    end
    else if Message = WM_CLOSE then
@@ -826,7 +816,34 @@ index 6bbf02f..9f084fc 100644
    else if Message = WM_CANCELMODE then
      RuntimeActive := False
    else if Message = WM_SETCURSOR then
-@@ -6387,7 +6417,7 @@ begin
+@@ -6140,6 +6171,7 @@ end;
+ procedure EndFramePresentation;
+ var
+   Tick: Cardinal;
++  LimitMs, ElapsedMs, Freq: QWord;
+ begin
+   if PresentationDepth > 0 then
+   begin
+@@ -6151,9 +6183,17 @@ begin
+       else
+       begin
+         Tick := GameTickCount;
+-        if 1000 div PresentationFrameRate < Tick - LastPresentationTick then
++        LimitMs := 16;
++        if PresentationFrameRate <> 0 then
++          LimitMs := 1000 div PresentationFrameRate;
++        ElapsedMs := LimitMs + 1;
++        Freq := SDL_GetPerformanceFrequency;
++        if (LastPresentationQpc <> 0) and (Freq <> 0) then
++          ElapsedMs := (SDL_GetPerformanceCounter - LastPresentationQpc) * 1000 div Freq;
++        if ElapsedMs > LimitMs then
+         begin
+           LastPresentationTick := Tick;
++          LastPresentationQpc := SDL_GetPerformanceCounter;
+           PresentScreenBuffer;
+         end;
+       end;
+@@ -6387,7 +6427,7 @@ begin
        repeat
          if (FindData.Attr and faDirectory) <> faDirectory then
            FirstFrameNumber :=
@@ -835,7 +852,7 @@ index 6bbf02f..9f084fc 100644
        until SysUtils.FindNext(FindData) <> 0;
        SysUtils.FindClose(FindData);
      end;
-@@ -6998,7 +7028,7 @@ end;
+@@ -6998,7 +7038,7 @@ end;
  procedure AppendLogLineThreadSafe(const Text: AnsiString);
  begin
    if SessionLogLock = nil then
@@ -844,7 +861,7 @@ index 6bbf02f..9f084fc 100644
    SessionLogLock.Enter;
    Append(SessionLog);
    Writeln(SessionLog, Text);
-@@ -7009,7 +7039,7 @@ end;
+@@ -7009,7 +7049,7 @@ end;
  procedure AppendLogTextThreadSafe(const Text: AnsiString);
  begin
    if SessionLogLock = nil then
@@ -853,7 +870,7 @@ index 6bbf02f..9f084fc 100644
    SessionLogLock.Enter;
    Append(SessionLog);
    Write(SessionLog, Text);
-@@ -7022,7 +7052,7 @@ var
+@@ -7022,7 +7062,7 @@ var
    Log: TextFile;
  begin
    if SessionLogLock = nil then
@@ -862,7 +879,7 @@ index 6bbf02f..9f084fc 100644
    SessionLogLock.Enter;
    AssignFile(Log, '#####add.log');
    if not FileExists('#####add.log') then
-@@ -7041,7 +7071,7 @@ begin
+@@ -7041,7 +7081,7 @@ begin
    if FileExists('#####add.log') then
    begin
      if SessionLogLock = nil then
@@ -871,7 +888,7 @@ index 6bbf02f..9f084fc 100644
      SessionLogLock.Enter;
      AssignFile(Log, '#####add.log');
      Append(Log);
-@@ -7056,7 +7086,7 @@ var
+@@ -7056,7 +7096,7 @@ var
    F: TextFile;
  begin
    if SessionLogLock = nil then
@@ -1012,73 +1029,14 @@ index e37d733..a5591d4 100644
  end;
  
 diff --git a/source/arcade/ab_MainForm.pas b/source/arcade/ab_MainForm.pas
-index 83290f1..6706d8e 100644
+index 83290f1..0df47af 100644
 --- a/source/arcade/ab_MainForm.pas
 +++ b/source/arcade/ab_MainForm.pas
-@@ -450,9 +450,12 @@ var
-   Ship, ShipX0, ShipX1: TabShip;
-   Index: Integer;
- begin
-+  AppendLogLineThreadSafe('AB.OnOpen begin');
-   if not MusicInHyperEnabled then
-     MusicManager.RequestFadeOut;
-+  AppendLogLineThreadSafe('AB.OnOpen a1 LoadPanel');
-   LoadPanel.OnOpen;
-+  AppendLogLineThreadSafe('AB.OnOpen a2');
-   if QueuedArcadeBattles.Count > 0 then
-     ActiveArcadeRequest := QueuedArcadeBattles[0]
-   else
-@@ -461,6 +464,7 @@ begin
-     ActiveArcadeRequestShips := ActiveArcadeRequest.Ships
-   else
-     ActiveArcadeRequestShips := nil;
-+  AppendLogLineThreadSafe('AB.OnOpen a3 request');
-   if (Galaxy <> nil)
-       and (GetPlayer <> nil)
-       and (ActiveArcadeRequest = nil)
-@@ -481,6 +485,7 @@ begin
-     InitialRandomSeed := RandomIntRange(100000, MaxInt);
-     RandomSeed := InitialRandomSeed;
-   end;
-+  AppendLogLineThreadSafe('AB.OnOpen a4 seed');
-   ArcadeKellerEncounter := False;
-   ArcadeMapViewPosition := Classes.Point(0, 0);
-   DefeatCountdownTicks := 150;
-@@ -502,7 +507,9 @@ begin
-   ArcadeSpaceProcess.RadarRange := 0;
-   ArcadeSpaceProcess.ActionRange := 0;
-   ArcadeSpaceProcess.ActionColor := 0;
-+  AppendLogLineThreadSafe('AB.OnOpen a8 OpenSpace');
-   ArcadeSpaceProcess.OpenSpace(WorldPanel, Self);
-+  AppendLogLineThreadSafe('AB.OnOpen a9');
-   ArcadeSpaceProcess.Space.AlphaShift := 0;
-   if GetPlayer <> nil then
-     if GetPlayer.IsHealthEffectActive(heBlindness) then
-@@ -730,6 +737,7 @@ begin
-     PlayerArcadeShip.AddEnemy(ShipX0);
-     PlayerArcadeShip.AddEnemy(ShipX1);
-   end;
-+  AppendLogLineThreadSafe('AB.OnOpen a18 weapons/enemies');
-   if GetPlayer = nil then
-     ABSpaceBuild(RandomIntRange(3, 8), HeadingDegreesToRadians(RandomRange(0, 355)))
-   else if ActiveArcadeRequest <> nil then
-@@ -811,8 +819,10 @@ begin
-   ArcadeTickCount := 0;
-   UpdateTimer := ScheduleCallbackTimer(ArcadeTickMs, ArcadeTickMs, TimerTakt);
-   ScrollTimer := ScheduleCallbackTimer(ScrollTime, ScrollTime, ScrollMapTimer);
-+  AppendLogLineThreadSafe('AB.OnOpen a24 TimerTakt');
-   TimerTakt(nil, 0);
-   HideHelp;
-+  AppendLogLineThreadSafe('AB.OnOpen complete');
- end;
- 
- procedure TfAB.OnClose;
-@@ -928,7 +938,11 @@ begin
+@@ -928,7 +928,10 @@ begin
    if ((VirtualKey = VK_ESCAPE) or (VirtualKey = VK_SPACE))
        and (VictoryPanel.Active or DefeatPanel.Active) then
    begin
 -    if (GetPlayer <> nil) and (GetPlayer.GetHull.HullPoints > 0) and VictoryPanel.Active then
-+    AppendLogLineThreadSafe('AB.BattleKeyDown victory/defeat exit key=' + IntToStr(VirtualKey));
 +    if (GetPlayer <> nil)
 +        and (GetPlayer.GetHull <> nil)
 +        and (GetPlayer.GetHull.HullPoints > 0)
@@ -1086,18 +1044,18 @@ index 83290f1..6706d8e 100644
      begin
        if ShowMessageBoxGI(
                Self,
-@@ -953,6 +967,10 @@ begin
+@@ -953,6 +956,10 @@ begin
        CloseVictory(nil, 0);
      Exit;
    end;
 +  // Ignore other keys while victory/defeat overlay is up; for some reason other key presses might cause a crash
-+  // Do not have time to debug this, consider this a FIXME
++  // Overlay is modal; other keys can tear down battle state.
 +  if VictoryPanel.Active or DefeatPanel.Active then
 +    Exit;
    if (VirtualKey = VK_TAB) and VictoryPanel.Active then
      with GetByName('PanelWinHide') do
        SetActive(not Active);
-@@ -1002,7 +1020,7 @@ begin
+@@ -1002,7 +1009,7 @@ begin
    end
    else if (VirtualKey = Ord('C')) and (ArcadeViewMode = 2) and (NextArcadeSpace = nil) then
      ArcadeMapViewPosition := TruncatePointF(PlayerMapPosition)
@@ -1106,7 +1064,7 @@ index 83290f1..6706d8e 100644
    begin
      ab_Weapon_Initialize(@PlayerArcadeShip.Weapons[0], 50);
      PlayerArcadeShip.Weapons[0].SlotData := 0;
-@@ -2452,11 +2470,17 @@ begin
+@@ -2452,11 +2459,17 @@ begin
      ArcadeMapBounds.Right := Max(ArcadeMapBounds.Right, Space.MapPosition.X);
      ArcadeMapBounds.Top := Min(ArcadeMapBounds.Top, Space.MapPosition.Y);
      ArcadeMapBounds.Bottom := Max(ArcadeMapBounds.Bottom, Space.MapPosition.Y);
@@ -1126,7 +1084,7 @@ index 83290f1..6706d8e 100644
      if (Space.PortalSlotCount < 0) or (Space.PortalSlotCount > 3) then
        RaiseWideMessage('Error in ABSpaceBuild: portal slot count');
      if Space.PortalSlotCount > 1 then
-@@ -2678,10 +2702,10 @@ begin
+@@ -2678,10 +2691,10 @@ begin
        begin
          ColorValue :=
              PInteger(
@@ -1139,7 +1097,7 @@ index 83290f1..6706d8e 100644
              )^;
          if ColorValue = 0 then
          begin
-@@ -2700,10 +2724,10 @@ begin
+@@ -2700,10 +2713,10 @@ begin
          begin
            ColorValue :=
                PInteger(
@@ -1152,7 +1110,7 @@ index 83290f1..6706d8e 100644
                )^;
            if ColorValue = 0 then
            begin
-@@ -2731,10 +2755,10 @@ begin
+@@ -2731,10 +2744,10 @@ begin
          begin
            ColorValue :=
                PInteger(
@@ -1165,7 +1123,7 @@ index 83290f1..6706d8e 100644
                )^;
            if ColorValue < 20 then
              Dec(ColorValue, 10);
-@@ -2749,7 +2773,7 @@ begin
+@@ -2749,7 +2762,7 @@ begin
      end;
      PInteger(@ColorData.SelectedVariant)^ := Selection;
      Dec(Remaining, PInteger(@ColorData.ByteSize)^);
@@ -1174,7 +1132,7 @@ index 83290f1..6706d8e 100644
    end;
    ArcadeKellerEncounter :=
        (GetPlayer <> nil)
-@@ -2959,12 +2983,12 @@ begin
+@@ -2959,12 +2972,12 @@ begin
      begin
        Frames :=
            Pointer(
@@ -1193,7 +1151,7 @@ index 83290f1..6706d8e 100644
            );
        FrameIndex := Frames.FrameIndex;
        FrameCount := PInteger(@Frames.FrameCount)^;
-@@ -2974,7 +2998,7 @@ begin
+@@ -2974,7 +2987,7 @@ begin
        Frames.FrameIndex := FrameIndex;
        ColorData.CurrentColor :=
            PInteger(
@@ -1446,20 +1404,23 @@ index c9ce7b5..e8043c8 100644
    if (OldOffset.X <> Offset.X) or (OldOffset.Y <> Offset.Y) then
      SetViewOffset(Offset);
 diff --git a/source/screens/fCfgSettings.pas b/source/screens/fCfgSettings.pas
-index 147799f..6c0444d 100644
+index 147799f..0b3de3c 100644
 --- a/source/screens/fCfgSettings.pas
 +++ b/source/screens/fCfgSettings.pas
-@@ -313,22 +313,35 @@ begin
+@@ -273,6 +273,7 @@ var
+   Panel: TPanelScrollBarGI;
+   I, LanguageCount: Integer;
+   Language, LanguageName: WideString;
++  InstallAnsi: AnsiString;
+   ValueLabel: TLabelGI;
+   Block: TBlockParEC;
+ begin
+@@ -313,22 +314,32 @@ begin
        Break;
      end;
    end;
-+  // Language picker: only list languages that actually have install_*.txt.
-+  // Partial installs (e.g. Russian-only with English still in AvailableLanguageCodes)
-+  // used to AV inside the first AddOptionLabel/LocalizedText path.
-+  // This needs more work: right now it still fails to find a file, due to Linux being
-+  // case-sensitive - so we ignore INSTALL_*.txt and still look for lower-case one.
-+  // Do not have time to debug this, disabled lang picker for now. FIXME?
-+  AppendLogLineThreadSafe('CfgSettings.OnOpen lang begin');
++  // Picker only if more than one language code is listed. Single-language
++  // installs (typical RU-only data) have no extra pack files.
    if not SteamInitialized and (RequestedLanguage = '') then
    begin
 -    AddOptionLabel('Lang', LocalizedText('FormCfgSettings.Lang'), True);
@@ -1469,22 +1430,25 @@ index 147799f..6c0444d 100644
 +    LanguageCount := 0;
 +    if AvailableLanguageCodes <> '' then
        LanguageCount := CountDelimitedPartsW(AvailableLanguageCodes, ',');
-+    // Count installed language packs (I = installed count)
 +    if LanguageCount > 1 then
 +    begin
 +      AddOptionLabel('Lang', LocalizedText('FormCfgSettings.Lang'), True);
        for I := 0 to LanguageCount - 1 do
        begin
          Language := ExtractDelimitedPartW(AvailableLanguageCodes, I, ',');
+-        if FileExists(NativeGamePath(AnsiString('install_' + Language + '.txt'))) then
 +        LanguageName := Language;
-         if FileExists(NativeGamePath(AnsiString('install_' + Language + '.txt'))) then
++        InstallAnsi := AnsiString('install_' + Language + '.txt');
++        if not FileExists(NativeGamePath(InstallAnsi)) then
++          InstallAnsi := AnsiString('INSTALL_' + Language + '.txt');
++        if FileExists(NativeGamePath(InstallAnsi)) then
          begin
            Block := TBlockParEC.Create;
 -          Block.LoadFromTextFileWithEncodingProbe(PWideChar('install_' + Language + '.txt'), False);
 -          LanguageName := Block.GetParam('LangName');
 -          Block.Free;
 +          try
-+            Block.LoadFromTextFileWithEncodingProbe(PWideChar('install_' + Language + '.txt'), False);
++            Block.LoadFromTextFileWithEncodingProbe(PWideChar(WideString(InstallAnsi)), False);
 +            LanguageName := Block.GetParam('LangName');
 +          finally
 +            Block.Free;
@@ -1492,22 +1456,19 @@ index 147799f..6c0444d 100644
          end;
          AddOptionChoice(
              I,
-@@ -337,12 +350,10 @@ begin
+@@ -337,11 +348,6 @@ begin
              (Galaxy <> nil) and HasInstalledPackages
          );
        end;
-+      AppendLogLineThreadSafe('CfgSettings.OnOpen lang choices=' + IntToStr(LanguageCount));
-     end
-     else
+-    end
+-    else
 -    begin
 -      Language := SelectedLanguage;
 -      AddOptionChoice(0, ExtractDelimitedPartW(Language, 0, ','), True, False);
--    end;
-+      AppendLogLineThreadSafe('CfgSettings.OnOpen lang skip (single/none)');
+     end;
    end;
    AddOptionLabel('MultiThread', LocalizedText('FormCfgSettings.MultiThread'), True);
-   AddOptionChoice(1, LocalizedText('FormCfgSettings.Yes'), MultiThreadEnabled, False);
-@@ -1254,56 +1265,70 @@ end;
+@@ -1254,56 +1260,69 @@ end;
  function TfCfgSettings.HasOptionValue(OptionName: WideString): Boolean;
  var
    Control: TObjectGI;
@@ -1604,12 +1565,11 @@ index 147799f..6c0444d 100644
 +    end;
    end;
 -  RaiseWideMessage('UnitGet Type=' + OptionName);
-+  // Missing option (e.g. Lang skipped on single-language install) — keep default 0.
-+  AppendLogLineThreadSafe('CfgSettings.GetOptionValue missing: ' + AnsiString(OptionName));
++  // Missing option (Lang omitted on a single-language install) stays 0.
  end;
  
  procedure TfCfgSettings.SetOptionValue(OptionName: WideString; Value: Integer);
-@@ -2141,7 +2166,7 @@ begin
+@@ -2141,7 +2160,7 @@ begin
    RestartNeeded := False;
    ResetNeeded := False;
    ActiveGroupIndex := 0;
@@ -1829,10 +1789,10 @@ index 2124f8c..9cf167c 100644
    TextBorderColor := 0;
    BorderEnabled := False;
 diff --git a/source/ui/GI_MessageLoop.pas b/source/ui/GI_MessageLoop.pas
-index 1d74d1d..9f2cf01 100644
+index 1d74d1d..bac5892 100644
 --- a/source/ui/GI_MessageLoop.pas
 +++ b/source/ui/GI_MessageLoop.pas
-@@ -1021,17 +1021,35 @@ end;
+@@ -1021,17 +1021,23 @@ end;
  
  procedure TObjectGI.BroadcastKeyDown(Key: Cardinal);
  var
@@ -1851,18 +1811,6 @@ index 1d74d1d..9f2cf01 100644
 +  except
 +    on E: EBreakMessageGI do
 +      raise;
-+    on E: Exception do
-+    begin
-+      AppendLogLineThreadSafe(
-+          'BroadcastKeyDown FAIL key='
-+              + IntToStr(Key)
-+              + ' '
-+              + E.ClassName
-+              + ' '
-+              + AnsiString(E.Message)
-+      );
-+      raise;
-+    end;
 +  end;
    Child := FirstChild;
    while Child <> nil do
@@ -1874,7 +1822,7 @@ index 1d74d1d..9f2cf01 100644
    end;
  end;
  
-@@ -2536,6 +2554,8 @@ end;
+@@ -2536,6 +2542,8 @@ end;
  
  procedure TMessageLoopGI.RequestClose(ResultCode: Integer);
  begin
@@ -1884,17 +1832,20 @@ index 1d74d1d..9f2cf01 100644
  end;
  
 diff --git a/tools/build.py b/tools/build.py
-index 6403970..4437ce2 100755
+index 6403970..eb06c19 100755
 --- a/tools/build.py
 +++ b/tools/build.py
-@@ -1,5 +1,5 @@
+@@ -1,7 +1,8 @@
  #!/usr/bin/env python3
 -"""Build Space Rangers HD for Linux, macOS or Android."""
 +"""Build Space Rangers HD for Linux, macOS, Windows, or Android."""
  
  import argparse
++import hashlib
  import json
-@@ -13,7 +13,7 @@ import subprocess
+ import os
+ import plistlib
+@@ -13,13 +14,26 @@ import subprocess
  import zipfile
  from pathlib import Path
  
@@ -1903,7 +1854,26 @@ index 6403970..4437ce2 100755
  from targets import desktop_directory, desktop_target
  
  ROOT = Path(__file__).resolve().parents[1]
-@@ -126,19 +126,27 @@ def pascal_flags(release: bool, *platform_paths: Path) -> list[str]:
+ PASCAL_FLAGS = ("-Mdelphi", "-FcUTF8")
+ 
+ 
++
++def mingw_safe_dir(path: Path) -> Path:
++    """CMake/windres Makefiles break on spaces and parentheses in the path."""
++    text = str(path)
++    if not any(ch in text for ch in " ()[]{}&;!$`"):
++        return path
++    alt = Path("/tmp") / ("srhd-mingw-" + hashlib.sha1(text.encode()).hexdigest()[:12])
++    alt.mkdir(parents=True, exist_ok=True)
++    print(f"Using scratch dir {alt} (path contains shell-special characters)", flush=True)
++    return alt
++
++
++
+ def require_tool(name: str) -> Path:
+     path = shutil.which(name)
+     if path is None:
+@@ -126,19 +140,27 @@ def pascal_flags(release: bool, *platform_paths: Path) -> list[str]:
          ROOT / "vendor/fpc/packages/oggvorbis/src",
          ROOT / "vendor/fpc/packages/fcl-image/src",
          ROOT / "vendor/fpc/packages/pasjpeg/src",
@@ -1933,7 +1903,7 @@ index 6403970..4437ce2 100755
  
  
  def build_paszlib(
-@@ -210,10 +218,20 @@ def build_macos(release: bool, rebuild: bool = False, *, lto: bool = False) -> P
+@@ -210,10 +232,20 @@ def build_macos(release: bool, rebuild: bool = False, *, lto: bool = False) -> P
  
  
  def build_linux(
@@ -1955,7 +1925,7 @@ index 6403970..4437ce2 100755
      libraries, units = (work / name for name in ("bin", "units"))
      for directory in (libraries, units):
          directory.mkdir(parents=True, exist_ok=True)
-@@ -229,26 +247,515 @@ def build_linux(
+@@ -229,26 +261,509 @@ def build_linux(
      )
      native = build_okgf(work, release, rebuild=rebuild)
      shutil.copy2(native / "libokgf.so", libraries)
@@ -2042,7 +2012,7 @@ index 6403970..4437ce2 100755
 +        return prefix_dir
 +    gcc = require_tool('x86_64-w64-mingw32-gcc')
 +    prefix_dir.mkdir(parents=True, exist_ok=True)
-+    src_root = work / 'mingw-deps-src'
++    src_root = mingw_safe_dir(work) / 'mingw-deps-src'
 +    src_root.mkdir(parents=True, exist_ok=True)
 +    def run(cmd, cwd):
 +        subprocess.run([str(c) for c in cmd], cwd=cwd, check=True)
@@ -2153,12 +2123,12 @@ index 6403970..4437ce2 100755
 +
 +    prefix_dir = work / "mingw-oggvorbis"
 +    stamp = prefix_dir / ".stamp"
-+    need = ("ogg.dll", "vorbis.dll", "vorbisfile.dll")
-+    if stamp.is_file() and stamp.read_text().strip() == "shared-2" and all((prefix_dir / "bin" / n).is_file() for n in need):
++    need = ("ogg.dll", "libvorbis.dll", "vorbisfile.dll")
++    if stamp.is_file() and stamp.read_text().strip() == "shared-8" and all((prefix_dir / "bin" / n).is_file() for n in need):
 +        return prefix_dir
 +    gcc = require_tool("x86_64-w64-mingw32-gcc")
 +    prefix_dir.mkdir(parents=True, exist_ok=True)
-+    src_root = work / "mingw-oggvorbis-src"
++    src_root = mingw_safe_dir(work) / "mingw-oggvorbis-src"
 +    src_root.mkdir(parents=True, exist_ok=True)
 +    bin_dir = prefix_dir / "bin"
 +    lib_dir = prefix_dir / "lib"
@@ -2197,6 +2167,7 @@ index 6403970..4437ce2 100755
 +        f"-DCMAKE_INSTALL_PREFIX={prefix_dir}",
 +        "-DCMAKE_BUILD_TYPE=Release",
 +        "-DBUILD_SHARED_LIBS=ON",
++        "-DCMAKE_SHARED_LIBRARY_PREFIX=",
 +        "-DINSTALL_DOCS=OFF",
 +    ], src_root)
 +    run(["cmake", "--build", str(odir / "build"), "-j1"], src_root)
@@ -2244,48 +2215,39 @@ index 6403970..4437ce2 100755
 +        f"-DCMAKE_PREFIX_PATH={prefix_dir}",
 +        "-DCMAKE_BUILD_TYPE=Release",
 +        "-DBUILD_SHARED_LIBS=ON",
++        "-DCMAKE_SHARED_LIBRARY_PREFIX=",
 +    ], src_root)
 +    run(["cmake", "--build", str(vdir / "build"), "-j1"], src_root)
 +    run(["cmake", "--install", str(vdir / "build")], src_root)
 +
-+    # Stage every name the PE imports have used in the wild.
++    # names those files. Do not ship lib*.dll copies.
 +    produced = {}
 +    for folder in (bin_dir, lib_dir, prefix_dir):
 +        if folder.is_dir():
 +            for dll in folder.rglob("*.dll"):
 +                produced[dll.name.lower()] = dll
-+
-+    def pick(*names: str):
-+        for n in names:
-+            if n.lower() in produced:
-+                return produced[n.lower()]
-+        return None
-+
-+    ogg = pick("libogg-0.dll", "libogg.dll", "ogg.dll", "ogglib.dll")
-+    vorbis = pick("libvorbis-0.dll", "libvorbis.dll", "vorbis.dll")
-+    vfile = pick("libvorbisfile-3.dll", "libvorbisfile.dll", "vorbisfile.dll")
-+    venc = pick("libvorbisenc-2.dll", "libvorbisenc.dll", "vorbisenc.dll")
-+    mapping = {
-+        "ogg.dll": ogg,
-+        "ogglib.dll": ogg,
-+        "vorbis.dll": vorbis,
-+        "libvorbis.dll": vorbis,
-+        "vorbisfile.dll": vfile,
-+        "libvorbisfile.dll": vfile,
-+        "vorbisenc.dll": venc,
++    # Rangers.exe → vorbisfile.dll → libvorbis.dll → ogg.dll
++    canon = {
++        "ogg.dll": ("ogg.dll", "libogg.dll", "libogg-0.dll", "ogglib.dll"),
++        "libvorbis.dll": ("libvorbis.dll", "libvorbis-0.dll", "vorbis.dll"),
++        "vorbisfile.dll": ("vorbisfile.dll", "libvorbisfile.dll", "libvorbisfile-3.dll"),
 +    }
-+    for dest_name, src in mapping.items():
++    for dest_name, names in canon.items():
++        src = next((produced[n] for n in names if n in produced), None)
 +        if src is None:
 +            raise FileNotFoundError(
 +                f"No DLL to ship as {dest_name}; have: " + ", ".join(sorted(produced))
 +            )
 +        dest = bin_dir / dest_name
-+        if dest.resolve() == src.resolve():
-+            print(f"Already have {dest_name}", flush=True)
-+            continue
-+        shutil.copy2(src, dest)
-+        print(f"Staged {src.name} → {dest_name}", flush=True)
-+    stamp.write_text("shared-2")
++        if dest.resolve() != src.resolve():
++            shutil.copy2(src, dest)
++        for extra in names:
++            if extra == dest_name:
++                continue
++            junk = bin_dir / extra
++            if junk.is_file() and junk.resolve() != dest.resolve():
++                junk.unlink()
++    stamp.write_text("shared-8")
 +    return prefix_dir
 +
 +
@@ -2364,6 +2326,14 @@ index 6403970..4437ce2 100755
 +    jpeg_a = first_a('libjpeg.a', 'libturbojpeg.a')
 +    if zlib_a is None:
 +        raise FileNotFoundError(f'Static zlib archive not found under {libdir}')
++    # ld splits -L on spaces; keep link inputs on a path without parentheses.
++    link_dir = mingw_safe_dir(work) / "link"
++    link_dir.mkdir(parents=True, exist_ok=True)
++    for src in (implib / "libwindows_deps.dll.a", implib / "windows_deps.dll.a"):
++        if src.is_file():
++            shutil.copy2(src, link_dir / src.name)
++    if zlib_a.is_file():
++        shutil.copy2(zlib_a, link_dir / "libz.a")
 +    native = build_okgf(work, release,
 +        '-DCMAKE_SYSTEM_NAME=Windows', '-DCMAKE_SYSTEM_PROCESSOR=x86_64', f'-DCMAKE_C_COMPILER={mingw_gcc}',
 +        f'-DCMAKE_RC_COMPILER={windres}', f'-DCMAKE_PREFIX_PATH={deps}',
@@ -2378,7 +2348,7 @@ index 6403970..4437ce2 100755
 +        *([f'-DPNG_LIBRARY={png_a}', f'-DPNG_PNG_INCLUDE_DIR={deps / "include"}'] if png_a else []),
 +        *([f'-DJPEG_LIBRARY={jpeg_a}', f'-DJPEG_INCLUDE_DIR={deps / "include"}'] if jpeg_a else []),
 +        '-DCMAKE_C_FLAGS=-Wno-error -Wno-pedantic',
-+        f'-DCMAKE_SHARED_LINKER_FLAGS=-static-libgcc -L{work / "lib"} -lwindows_deps {zlib_a}',
++        f'-DCMAKE_SHARED_LINKER_FLAGS=-static-libgcc -L{link_dir} -lwindows_deps -lz',
 +        rebuild=rebuild)
 +    dll_candidates = list(native.rglob('okgf.dll')) + list(native.rglob('libokgf.dll'))
 +    if not dll_candidates:
@@ -2428,12 +2398,9 @@ index 6403970..4437ce2 100755
 +            if not dst.is_file():
 +                shutil.copy2(src, dst)
 +                print(f"Aliased {src.name} → {dest}", flush=True)
-+    alias(["ogg.dll", "ogglib.dll", "libogg-0.dll", "libogg.dll"],
-+          ["ogg.dll", "ogglib.dll"])
-+    alias(["vorbis.dll", "libvorbis.dll", "libvorbis-0.dll"],
-+          ["vorbis.dll", "libvorbis.dll"])
-+    alias(["vorbisfile.dll", "libvorbisfile.dll", "libvorbisfile-3.dll"],
-+          ["vorbisfile.dll"])
++    alias(["ogg.dll", "libogg.dll", "libogg-0.dll"], ["ogg.dll"])
++    alias(["libvorbis.dll", "libvorbis-0.dll", "vorbis.dll"], ["libvorbis.dll"])
++    alias(["vorbisfile.dll", "libvorbisfile.dll", "libvorbisfile-3.dll"], ["vorbisfile.dll"])
 +
 +    compiler, compiler_flags, _wu = prepare_windows_cross(run_step)
 +    paszlib = build_paszlib(work, compiler, compiler_flags, rebuild)
@@ -2467,10 +2434,7 @@ index 6403970..4437ce2 100755
 +            if so.is_file(): subprocess.run([strip, '--strip-unneeded', str(so)], check=False)
 +    keep = {
 +        'Rangers.exe', 'okgf.dll', 'SDL2.dll', 'windows_deps.dll',
-+        'ogg.dll', 'ogglib.dll', 'libogg.dll',
-+        'vorbis.dll', 'libvorbis.dll',
-+        'vorbisfile.dll', 'libvorbisfile.dll',
-+        'vorbisenc.dll', 'libvorbisenc.dll',
++        'vorbisfile.dll', 'libvorbis.dll', 'ogg.dll',
 +    }
 +    for extra in list(libraries.iterdir()):
 +        if extra.is_file() and extra.name not in keep:
@@ -2480,7 +2444,7 @@ index 6403970..4437ce2 100755
  
  
  def latest_sdk_directory(parent: Path, prefix: str = "") -> Path:
-@@ -397,9 +904,14 @@ def sign_android_apk(work: Path, unsigned: Path, sdk_tools: Path, java: Path) ->
+@@ -397,9 +912,14 @@ def sign_android_apk(work: Path, unsigned: Path, sdk_tools: Path, java: Path) ->
  
  def main() -> None:
      parser = argparse.ArgumentParser(description=__doc__)
@@ -2496,7 +2460,7 @@ index 6403970..4437ce2 100755
      parser.add_argument("--lto", action="store_true", help="Enable LLVM LTO (Linux or macOS).")
      parser.add_argument(
          "--rebuild", action="store_true", help="Rebuild all game units and native code."
-@@ -415,8 +927,13 @@ def main() -> None:
+@@ -415,8 +935,13 @@ def main() -> None:
          resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, desired), hard))
          if args.target == "android":
              artifact = build_android(args.release, args.rebuild)
@@ -2512,10 +2476,33 @@ index 6403970..4437ce2 100755
              artifact = build_macos(args.release, args.rebuild, lto=args.lto)
      except subprocess.CalledProcessError as error:
 diff --git a/tools/compiler.py b/tools/compiler.py
-index 8284213..5cd21f5 100644
+index 8284213..5b13202 100644
 --- a/tools/compiler.py
 +++ b/tools/compiler.py
-@@ -140,3 +140,94 @@ def prepare_compiler(
+@@ -10,7 +10,21 @@ from targets import linux_cpu
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ VENDOR = ROOT / "vendor/fpc"
+-WORK = ROOT / ".local/fpc"
++
++
++def _compiler_work() -> Path:
++    # FPC makefiles pass paths through unquoted $(MAKE) -C. Parentheses/spaces
++    # in the repo path (e.g. "Foo (copy)") become an empty -C argument.
++    text = str(ROOT)
++    if any(ch in text for ch in " ()[]{}&;!$`"):
++        path = Path("/tmp") / ("srhd-fpc-" + hashlib.sha1(text.encode()).hexdigest()[:12])
++    else:
++        path = ROOT / ".local" / "fpc"
++    path.mkdir(parents=True, exist_ok=True)
++    return path
++
++
++WORK = _compiler_work()
+ SOURCE = WORK / "source"
+ LLVM_FLAGS = ("-Clv17.0",)
+ 
+@@ -140,3 +154,94 @@ def prepare_compiler(
          *(f"-Fu{path}" for path in paths),
          f"-Fi{packages}/fcl-process/src/unix",
      ]  # fmt: skip
