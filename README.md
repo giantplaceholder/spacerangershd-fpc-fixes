@@ -53,16 +53,20 @@ NB: macOS builds are untested and unverified. I have no hardware to run them on,
 
 - Install dependencies:
 
-`sudo apt update && sudo apt install -y build-essential git python3 cmake make pkg-config fpc fp-compiler libsdl2-dev libogg-dev libvorbis-dev libjpeg-turbo8-dev libpng-dev zlib1g-dev libxvidcore-dev libxvidcore4 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 mingw-w64-tools unzip wget ca-certificates clang lld`
+```
+sudo apt update && sudo apt install -y build-essential git python3 cmake make pkg-config fpc fp-compiler libsdl2-dev libogg-dev libvorbis-dev libjpeg-turbo8-dev libpng-dev zlib1g-dev libxvidcore-dev libxvidcore4 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 mingw-w64-tools unzip wget ca-certificates clang lld
+```
 
 - Clone upstream:
 
-`git clone https://github.com/pakompom/SpaceRangersHD_FPC.git`
-`cd SpaceRangersHD_FPC`
-`git checkout --detach 5f491a841cbd11d2a9a6861a822a08ffa64d15f2`
-`git submodule update --init --recursive`
-`git -C vendor/fpc checkout --detach 3a1c9cfae7f7a2bb17079b2989f562dbc5728b01`
-`git -C vendor/okgf checkout --detach c01aa7a168a6f1772541501074b7bba1b96550ef`
+```
+git clone https://github.com/pakompom/SpaceRangersHD_FPC.git
+cd SpaceRangersHD_FPC
+git checkout --detach 5f491a841cbd11d2a9a6861a822a08ffa64d15f2
+git submodule update --init --recursive
+git -C vendor/fpc checkout --detach 3a1c9cfae7f7a2bb17079b2989f562dbc5728b01
+git -C vendor/okgf checkout --detach c01aa7a168a6f1772541501074b7bba1b96550ef
+```
 
 - Download `fixes.patch` from this repo and put it into the `SpaceRangersHD_FPC` directory.
 
@@ -113,6 +117,7 @@ PLEASE NOTE: this patch is not affiliated with or endorsed by game's developers 
 
 # Boring warranty disclaimer?
 
+```
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -120,9 +125,10 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
 
 # Acknowledgements?
 
-Upstream: 
+Upstream:
 - [SpaceRangersHD_FPC](//github.com/pakompom/SpaceRangersHD_FPC) by [pakompom](https://github.com/pakompom) ([NOTICE](//github.com/pakompom/SpaceRangersHD_decomp/blob/7342a10dc1a0dcaa242ea4bc8c33e29c0eb6bdc0/NOTICE.md), [LICENSE](https://github.com/pakompom/SpaceRangersHD_decomp/blob/7342a10dc1a0dcaa242ea4bc8c33e29c0eb6bdc0/LICENSE))
 
