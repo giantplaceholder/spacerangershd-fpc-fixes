@@ -2617,3 +2617,35 @@ index 788aeec..f329397 100644
 +    if target == "windows":
 +        return directory / "bin/Rangers.exe"
      return directory / "Space Rangers HD.app/Contents/MacOS/Rangers"
+diff --git a/platform/TlHelp32.pas b/platform/TlHelp32.pas
+new file mode 100644
+index 0000000..b3e1c01
+--- /dev/null
++++ b/platform/TlHelp32.pas
+@@ -0,0 +1,26 @@
++{ Delphi-compatible unit name for Tool Help API.
++  FPC already declares the API and types in unit Windows; this unit only
++  aliases Delphi-style names so existing ``uses TlHelp32`` code type-checks
++  against Windows.MODULEENTRY32 (same type identity, no duplicate records). }
++unit TlHelp32;
++
++{$MODE DELPHI}
++
++interface
++
++uses
++  Windows;
++
++type
++  { Same type as Windows.MODULEENTRY32 — required for var-parameter matching. }
++  TModuleEntry32 = MODULEENTRY32;
++  PModuleEntry32 = ^TModuleEntry32;
++  TProcessEntry32 = PROCESSENTRY32;
++  PProcessEntry32 = ^TProcessEntry32;
++
++{ Constants and CreateToolhelp32Snapshot / Module32First / Module32Next /
++  Process32First / Process32Next are provided by unit Windows. }
++
++implementation
++
++end.
