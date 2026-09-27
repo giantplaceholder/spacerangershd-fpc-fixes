@@ -17,7 +17,7 @@ Those are located at `vendor/` of the upstream repo.
 
 You bet. I cobbled this together while on vacation, so I barely tested the build. I have fixed all of the crashes I've encountered immediately, but I'm certain that there's a lot of them still lurking beneath.
 
-Resulting binaries have been launched on Windows 10 and 11, Linux Mint 22.1 Xia and Steam Deck (whatever is current as of this second).
+Resulting binaries have been successfully launched on Windows 10 and 11, Linux Mint 22.1 Xia, Debian Trixie and SteamOS Holo 3.8.16.
 
 # But upstream supports Linux now, doesn't it? Maybe it will support Windows?
 
@@ -39,22 +39,30 @@ No gameplay or balance changes.
 
 # Cross-platform support details?
 
-Linux and Windows binaries can be built on any modern Ubuntu (24.04+) or Linux Mint (22.1 Xia). Debian Trixie should work also.
+Linux and Windows binaries can be built on any modern Ubuntu (24.04+), Linux Mint (22.1 Xia) or Debian (Trixie).
 
 Linux binaries are produced natively, Windows build uses mingw64 to cross-compile. The latter requires an active internet connection to build, sorry for that.
 
 By default, Linux builds use vendored fpc fork, but you can also build them with the system one.
 
-I see no reason why this won't build on any other recent Linux, but you'll have to adapt dependencies from below to your distro by yourself.
+I see no reason why this won't build on any other recent Linux, but you'll have to adapt dependencies from below to your distro by yourself. For instance, on Arch or CachyOS you might need to install mingw64 from AUR or extra repos.
 
 NB: macOS builds are untested and unverified. I have no hardware to run them on, nor the desire to debug the build.
 
 # How to apply patch and build?
 
-- Install dependencies:
+- Install dependencies
+
+Ubuntu 24.04 & Linux Mint Xia: 
 
 ```
 sudo apt update && sudo apt install -y build-essential git python3 cmake make pkg-config fpc fp-compiler libsdl2-dev libogg-dev libvorbis-dev libjpeg-turbo8-dev libpng-dev zlib1g-dev libxvidcore-dev libxvidcore4 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 mingw-w64-tools unzip wget ca-certificates clang lld
+```
+
+Debian Trixie:
+
+```
+sudo apt update && sudo apt install -y build-essential git python3 cmake make pkg-config fpc libsdl2-dev libogg-dev libvorbis-dev libjpeg-dev libpng-dev zlib1g-dev libxvidcore-dev gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 mingw-w64-tools unzip wget ca-certificates clang lld
 ```
 
 - Clone upstream:
