@@ -1,0 +1,145 @@
+diff --git a/tools/build.py b/tools/build.py
+index 38824a6..b694d98 100755
+--- a/tools/build.py
++++ b/tools/build.py
+@@ -69,7 +69,7 @@ def command_signature(command: list[str | Path]) -> str:
+     return json.dumps([list(map(str, command)), str(compiler), stat.st_mtime_ns, stat.st_size])
+ 
+ 
+-def compile_pascal(work: Path, command: list[str | Path], rebuild: bool) -> None:
++def compile_pascal(work: Path, command: list[str | Path], rebuild: bool, extra_env: dict | None = None) -> None:
+     # FPC tracks unit/source dependencies, but not every change to compiler options.
+     stamp = work / "pascal-command.json"
+     signature = command_signature(command)
+@@ -82,7 +82,22 @@ def compile_pascal(work: Path, command: list[str | Path], rebuild: bool) -> None
+         command = [command[0], "-B", *command[1:]]
+     # A failed build must not leave units compiled with a mixture of settings.
+     stamp.write_text("")
+-    run_step(work, "pascal", command)
++    if extra_env:
++        env = dict(os.environ)
++        env.update(extra_env)
++        log = work / "pascal.log"
++        print("Building pascal…", flush=True)
++        with log.open("w") as stream:
++            subprocess.run(
++                [str(arg) for arg in command],
++                cwd=work,
++                stdout=stream,
++                stderr=subprocess.STDOUT,
++                check=True,
++                env=env,
++            )
++    else:
++        run_step(work, "pascal", command)
+     stamp.write_text(signature)
+ 
+ 
+@@ -286,6 +301,7 @@ def build_linux(
+             (ogg_a, "libogg.a"),
+             (vorbis_a, "libvorbis.a"),
+             (vorbisfile_a, "libvorbisfile.a"),
++            (linux_system_archive("libvorbisenc.a"), "libvorbisenc.a"),
+         ):
+             shutil.copy2(src, libraries / dest)
+         sdl_so = linux_system_shared("libSDL2-2.0.so.0", "libSDL2-2.0.so.0.3000.0")
+@@ -311,6 +327,13 @@ def build_linux(
+                 raise FileNotFoundError("Clang cannot locate libgcc; install the GCC runtime.")
+             compiler_flags += [f"-Fl{libgcc.parent}"]
+     paszlib = build_paszlib(work, compiler, compiler_flags, rebuild)
++    pascal_env = None
++    if static:
++        wrap = install_static_ld_wrapper(work, libraries)
++        pascal_env = {
++            "PATH": str(wrap) + os.pathsep + os.environ.get("PATH", ""),
++            "SRHD_REAL_LD": "/usr/bin/ld.bfd",
++        }
+     # CMake finds C libraries; FPC needs the corresponding native search paths.
+     library_flags = shlex.split(output("pkg-config", "--libs-only-L", "sdl2", "vorbisfile"))
+     flags = list(pascal_flags(release, paszlib))
+@@ -329,6 +352,9 @@ def build_linux(
+         flags = [f for f in flags if not any(d in f for d in drop)]
+     else:
+         flags = [*compiler_flags, *flags]
++    if static and pascal_env:
++        wrap = Path(pascal_env["PATH"].split(os.pathsep)[0])
++        flags.append(f"-FD{wrap}")
+     compile_pascal(work, [
+         compiler, *([] if system_fpc else compiler_flags if not opt else []),
+         *flags,
+@@ -386,7 +412,7 @@ def build_linux(
+             ]
+         ),
+         ROOT / "source/Rangers.dpr",
+-    ], rebuild)  # fmt: skip
++    ], rebuild, extra_env=pascal_env)  # fmt: skip
+     binary = libraries / "Rangers"
+     if not binary.is_file():
+         raise FileNotFoundError(f"Expected binary at {binary}")
+@@ -403,24 +429,55 @@ def build_linux(
+                 if path.is_file():
+                     subprocess.run([strip, "--strip-unneeded", str(path)], check=False)
+     if static:
+-        for name in (
+-            "libvorbis.so.0",
+-            "libvorbisfile.so.3",
+-            "libvorbisenc.so.2",
+-            "libogg.so.0",
+-        ):
+-            try:
+-                src = linux_system_shared(name)
+-            except FileNotFoundError:
+-                continue
+-            shutil.copy2(src, libraries / name)
+         for junk in list(libraries.glob("*.a")) + list(libraries.glob("link*.res")):
+             junk.unlink()
++        for name in ("libvorbis.so.0", "libvorbisfile.so.3", "libvorbisenc.so.2", "libogg.so.0"):
++            extra = libraries / name
++            if extra.is_file():
++                extra.unlink()
+     return binary
+ 
+ 
+ 
+ 
++
++def install_static_ld_wrapper(work: Path, libraries: Path) -> Path:
++    """Put a fake ld first on PATH so we can inject static ogg/vorbis archives."""
++    wrap = work / "ld-wrap"
++    wrap.mkdir(parents=True, exist_ok=True)
++    script = wrap / "ld.bfd"
++    archives = " ".join(
++        f'"{libraries / name}"'
++        for name in ("libvorbisfile.a", "libvorbisenc.a", "libvorbis.a", "libogg.a")
++    )
++    script.write_text(
++        "#!/bin/sh\n"
++        "set -e\n"
++        f'REAL="${{SRHD_REAL_LD:-/usr/bin/ld.bfd}}"\n'
++        f'LOG="{work / "ld-wrap.log"}"\n'
++        'echo "$@" >> "$LOG"\n'
++        "out=\n"
++        "for arg in \"$@\"; do\n"
++        '  case "$arg" in\n'
++        "    -lvorbis|-lvorbisfile|-lvorbisenc|-logg) continue ;;\n"
++        "    *.res)\n"
++        '      if [ -f "$arg" ]; then\n'
++        "        sed -i -e '/^-lvorbis$/d' -e '/^-lvorbisfile$/d' -e '/^-lvorbisenc$/d' -e '/^-logg$/d' \"$arg\"\n"
++        "      fi\n"
++        '      out="$out $arg"\n'
++        "      continue\n"
++        "      ;;\n"
++        "  esac\n"
++        '  out="$out $arg"\n'
++        "done\n"
++        f'exec "$REAL" $out {archives}\n'
++    )
++    script.chmod(0o755)
++    (wrap / "ld").write_text("#!/bin/sh\nexec \"$(dirname \"$0\")/ld.bfd\" \"$@\"\n")
++    (wrap / "ld").chmod(0o755)
++    return wrap
++
++
+ def linux_system_archive(*names: str) -> Path:
+     roots = (
+         Path("/usr/lib/x86_64-linux-gnu"),

@@ -1,0 +1,34 @@
+diff --git a/tools/build.py b/tools/build.py
+index ac7f4a0..b18aa7a 100755
+--- a/tools/build.py
++++ b/tools/build.py
+@@ -918,29 +918,6 @@ def build_mingw_image_deps(work: Path) -> Path:
+     return prefix_dir
+ 
+ 
+-
+-def copy_mingw_runtime_dlls(libraries: Path) -> None:
+-    """Ship libgcc / winpthread next to Rangers.exe (required by MinGW-linked code)."""
+-    gcc = require_tool("x86_64-w64-mingw32-gcc")
+-    for name in (
+-        "libgcc_s_seh-1.dll",
+-        "libwinpthread-1.dll",
+-        "libstdc++-6.dll",
+-        "libssp-0.dll",
+-    ):
+-        printed = subprocess.check_output(
+-            [str(gcc), f"-print-file-name={name}"], text=True
+-        ).strip()
+-        src = Path(printed)
+-        if not src.is_file() or src.name != name:
+-            # print-file-name returns the name unchanged when missing
+-            continue
+-        dest = libraries / name
+-        if not dest.is_file() or dest.stat().st_mtime < src.stat().st_mtime:
+-            shutil.copy2(src, dest)
+-            print(f"Copied MinGW runtime {name}", flush=True)
+-
+-
+ def build_mingw_ogg_vorbis(work: Path) -> Path:
+     import re
+     """Build libogg + libvorbis for MinGW; install DLLs under names FPC expects.

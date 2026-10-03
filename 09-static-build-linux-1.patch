@@ -1,0 +1,304 @@
+diff --git a/BUILDING.md b/BUILDING.md
+index 1ba779c..4f74e6e 100644
+--- a/BUILDING.md
++++ b/BUILDING.md
+@@ -30,6 +30,8 @@ explicitly. Resources default to `game/` when `--game-dir` is omitted.
+ - `--llvm`: LLVM backend on Linux; macOS uses LLVM by default.
+ - `--lto`: Pascal link-time optimization, implying LLVM; unavailable on Android.
+ - `--rebuild`: rebuild all game units and native code (build script only).
++- `--static` (Linux): static-link okgf, jpeg, png, zlib, ogg, and vorbis into `Rangers`.
++  Copies `libSDL2-2.0.so.0` and `libxvidcore.so.4` next to the binary (`$ORIGIN`).
+ 
+ - `--system-fpc` (Linux): use distro `fpc` instead of the vendored compiler bootstrap.
+   Still needs `vendor/fpc` checked out for package **sources** (paszlib); does not build FPC itself.
+diff --git a/tools/build.py b/tools/build.py
+index 1c03faf..38824a6 100755
+--- a/tools/build.py
++++ b/tools/build.py
+@@ -238,6 +238,7 @@ def build_linux(
+     llvm: bool = False,
+     lto: bool = False,
+     system_fpc: bool = False,
++    static: bool = False,
+ ) -> Path:
+     llvm = llvm or lto
+     if system_fpc and llvm:
+@@ -246,6 +247,8 @@ def build_linux(
+     if system_fpc:
+         # Keep system builds out of the vendored-compiler profile paths.
+         work = ROOT / ".local" / "linux-system" / ("release" if release else "debug")
++    if static:
++        work = Path(str(work) + "-static")
+     libraries, units = (work / name for name in ("bin", "units"))
+     for directory in (libraries, units):
+         directory.mkdir(parents=True, exist_ok=True)
+@@ -259,8 +262,39 @@ def build_linux(
+         ["pkg-config", "--print-errors", "--exists", "sdl2 >= 2.26", "vorbisfile", "ogg"],
+         check=True,
+     )
+-    native = build_okgf(work, release, rebuild=rebuild)
+-    shutil.copy2(native / "libokgf.so", libraries)
++    if static:
++        pic = build_linux_pic_image_deps(work)
++        libdir = pic / "lib"
++        jpeg_a = next(p for p in (libdir / "libjpeg.a", libdir / "libturbojpeg.a") if p.is_file())
++        png_a = next(p for p in (libdir / "libpng16.a", libdir / "libpng.a") if p.is_file())
++        z_a = next(p for p in (libdir / "libz.a", libdir / "libzlibstatic.a") if p.is_file())
++        ogg_a = linux_system_archive("libogg.a")
++        vorbis_a = linux_system_archive("libvorbis.a")
++        vorbisfile_a = linux_system_archive("libvorbisfile.a")
++        native = build_okgf(
++            work,
++            release,
++            f"-DJPEG_LIBRARY={jpeg_a}",
++            f"-DPNG_LIBRARY={png_a}",
++            f"-DZLIB_LIBRARY={z_a}",
++            "-DZLIB_USE_STATIC_LIBS=ON",
++            rebuild=rebuild,
++        )
++        so = next(path for path in [native / "libokgf.so", *native.rglob("libokgf.so")] if path.is_file())
++        shutil.copy2(so, libraries / "libokgf.so")
++        for src, dest in (
++            (ogg_a, "libogg.a"),
++            (vorbis_a, "libvorbis.a"),
++            (vorbisfile_a, "libvorbisfile.a"),
++        ):
++            shutil.copy2(src, libraries / dest)
++        sdl_so = linux_system_shared("libSDL2-2.0.so.0", "libSDL2-2.0.so.0.3000.0")
++        xvid_so = linux_system_shared("libxvidcore.so.4", "libxvidcore.so.4.3")
++        shutil.copy2(sdl_so, libraries / "libSDL2-2.0.so.0")
++        shutil.copy2(xvid_so, libraries / "libxvidcore.so.4")
++    else:
++        native = build_okgf(work, release, rebuild=rebuild)
++        shutil.copy2(native / "libokgf.so", libraries)
+     if system_fpc:
+         compiler = require_tool("fpc")
+         # Prefer the native code generator; use system unit paths from fpc.cfg.
+@@ -302,14 +336,55 @@ def build_linux(
+         *("-Fl" + flag[2:] for flag in library_flags),
+         # LLD resolves command-line -l before FPC's script SEARCH_DIR entries.
+         # FPC reparses -k options; quote the whole linker argument for spaced paths.
+-        f'-k"-L{libraries}"', "-k-lokgf", "-k--enable-new-dtags", "-k-rpath", "-k$ORIGIN",
++        f'-k"-L{libraries}"',
++        *(
++            [
++                "-k-lokgf",
++                f"-k{libraries / 'libvorbisfile.a'}",
++                f"-k{libraries / 'libvorbis.a'}",
++                f"-k{libraries / 'libogg.a'}",
++                "-k-lSDL2",
++                "-k-lm",
++                "-k-ldl",
++                "-k-lpthread",
++                "-k--enable-new-dtags",
++                "-k-rpath",
++                "-k$ORIGIN",
++            ]
++            if static
++            else ["-k-lokgf", "-k--enable-new-dtags", "-k-rpath", "-k$ORIGIN"]
++        ),
+         ROOT / "source/Rangers.dpr",
+     ] if not system_fpc else [
+         compiler, *compiler_flags, *flags,
+         f"-FU{units}", f"-FE{libraries}", f"-Fl{libraries}",
+         *("-Fl" + flag[2:] for flag in library_flags),
+-        f'-k"-L{libraries}"', "-k-lokgf", "-k-rpath", "-k$ORIGIN",
+-        "-k-lSDL2", "-k-lm", "-k-ldl", "-k-lpthread",
++        *(["-Fl/usr/lib/x86_64-linux-gnu", '-k"-L/usr/lib/x86_64-linux-gnu"'] if static else []),
++        f'-k"-L{libraries}"',
++        *(
++            [
++                "-k-lokgf",
++                f"-k{libraries / 'libvorbisfile.a'}",
++                f"-k{libraries / 'libvorbis.a'}",
++                f"-k{libraries / 'libogg.a'}",
++                "-k-lSDL2",
++                "-k-lm",
++                "-k-ldl",
++                "-k-lpthread",
++                "-k-rpath",
++                "-k$ORIGIN",
++            ]
++            if static
++            else [
++                "-k-lokgf",
++                "-k-rpath",
++                "-k$ORIGIN",
++                "-k-lSDL2",
++                "-k-lm",
++                "-k-ldl",
++                "-k-lpthread",
++            ]
++        ),
+         ROOT / "source/Rangers.dpr",
+     ], rebuild)  # fmt: skip
+     binary = libraries / "Rangers"
+@@ -323,10 +398,127 @@ def build_linux(
+             so = libraries / "libokgf.so"
+             if so.is_file():
+                 subprocess.run([strip, "--strip-unneeded", str(so)], check=False)
++            for shipped in ("libSDL2-2.0.so.0", "libxvidcore.so.4"):
++                path = libraries / shipped
++                if path.is_file():
++                    subprocess.run([strip, "--strip-unneeded", str(path)], check=False)
++    if static:
++        for name in (
++            "libvorbis.so.0",
++            "libvorbisfile.so.3",
++            "libvorbisenc.so.2",
++            "libogg.so.0",
++        ):
++            try:
++                src = linux_system_shared(name)
++            except FileNotFoundError:
++                continue
++            shutil.copy2(src, libraries / name)
++        for junk in list(libraries.glob("*.a")) + list(libraries.glob("link*.res")):
++            junk.unlink()
+     return binary
+ 
+ 
+ 
++
++def linux_system_archive(*names: str) -> Path:
++    roots = (
++        Path("/usr/lib/x86_64-linux-gnu"),
++        Path("/usr/lib64"),
++        Path("/usr/lib"),
++    )
++    for name in names:
++        for root in roots:
++            cand = root / name
++            if cand.is_file():
++                return cand
++    raise FileNotFoundError("Missing static archive " + ", ".join(names))
++
++
++def linux_system_shared(*names: str) -> Path:
++    roots = (
++        Path("/usr/lib/x86_64-linux-gnu"),
++        Path("/usr/lib64"),
++        Path("/usr/lib"),
++    )
++    for name in names:
++        for root in roots:
++            cand = root / name
++            if cand.is_file() or cand.is_symlink():
++                return cand.resolve()
++    raise FileNotFoundError("Missing shared library " + ", ".join(names))
++
++
++
++def build_linux_pic_image_deps(work: Path) -> Path:
++    """Host static zlib/png/jpeg with -fPIC so they can go inside libokgf.so."""
++    import tarfile, urllib.request
++    prefix_dir = work / "linux-pic-deps"
++    stamp = prefix_dir / ".stamp"
++    if stamp.is_file() and stamp.read_text().strip() == "pic-3" and (prefix_dir / "lib").is_dir():
++        return prefix_dir
++    prefix_dir.mkdir(parents=True, exist_ok=True)
++    src_root = work / "linux-pic-deps-src"
++    src_root.mkdir(parents=True, exist_ok=True)
++
++    def run(cmd):
++        subprocess.run([str(c) for c in cmd], check=True)
++
++    def cmake_build(src: Path, extra: list[str]):
++        build = src / "build-pic"
++        run([
++            "cmake", "-S", src, "-B", build,
++            f"-DCMAKE_INSTALL_PREFIX={prefix_dir}",
++            "-DCMAKE_BUILD_TYPE=Release",
++            "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
++            "-DBUILD_SHARED_LIBS=OFF",
++            *extra,
++        ])
++        run(["cmake", "--build", build, "-j1"])
++        run(["cmake", "--install", build])
++
++    zver, pver, jver = "1.3.1", "1.6.43", "3.0.3"
++    zdir = src_root / f"zlib-{zver}"
++    if not zdir.is_dir():
++        za = src_root / f"zlib-{zver}.tar.gz"
++        if not za.is_file():
++            print(f"Downloading zlib {zver}…", flush=True)
++            urllib.request.urlretrieve(
++                f"https://github.com/madler/zlib/releases/download/v{zver}/zlib-{zver}.tar.gz", za
++            )
++        with tarfile.open(za) as tf:
++            tf.extractall(src_root)
++    cmake_build(zdir, [])
++    pdir = src_root / f"libpng-{pver}"
++    if not pdir.is_dir():
++        pa = src_root / f"libpng-{pver}.tar.gz"
++        if not pa.is_file():
++            print(f"Downloading libpng {pver}…", flush=True)
++            urllib.request.urlretrieve(f"https://download.sourceforge.net/libpng/libpng-{pver}.tar.gz", pa)
++        with tarfile.open(pa) as tf:
++            tf.extractall(src_root)
++    cmake_build(pdir, [
++        f"-DCMAKE_PREFIX_PATH={prefix_dir}",
++        "-DPNG_SHARED=OFF",
++        "-DPNG_STATIC=ON",
++        "-DPNG_TESTS=OFF",
++    ])
++    jdir = src_root / f"libjpeg-turbo-{jver}"
++    if not jdir.is_dir():
++        ja = src_root / f"libjpeg-turbo-{jver}.tar.gz"
++        if not ja.is_file():
++            print(f"Downloading libjpeg-turbo {jver}…", flush=True)
++            urllib.request.urlretrieve(
++                f"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/{jver}/libjpeg-turbo-{jver}.tar.gz",
++                ja,
++            )
++        with tarfile.open(ja) as tf:
++            tf.extractall(src_root)
++    cmake_build(jdir, ["-DENABLE_SHARED=OFF", "-DENABLE_STATIC=ON"])
++    stamp.write_text("pic-3")
++    return prefix_dir
++
++
+ def build_mingw_image_deps(work: Path) -> Path:
+     import tarfile, urllib.request
+     prefix_dir = work / 'mingw-deps'
+@@ -891,11 +1083,18 @@ def main() -> None:
+     parser.add_argument(
+         "--rebuild", action="store_true", help="Rebuild all game units and native code."
+     )
++    parser.add_argument(
++        "--static",
++        action="store_true",
++        help="Linux: static-link okgf/jpeg/png/zlib/ogg/vorbis; ship SDL2 and xvidcore next to Rangers.",
++    )
+     args = parser.parse_args()
+     if args.lto and args.target == "android":
+         parser.error("--lto is currently supported only for Linux and macOS builds.")
+     if args.llvm and args.target != "linux":
+         parser.error("--llvm selects the optional Linux backend; other targets already use LLVM.")
++    if args.static and args.target != "linux":
++        parser.error("--static is currently implemented only for Linux.")
+     try:
+         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+         desired = 4096 if hard == resource.RLIM_INFINITY else min(4096, hard)
+@@ -908,6 +1107,7 @@ def main() -> None:
+             artifact = build_linux(
+                 args.release, args.rebuild, llvm=args.llvm, lto=args.lto,
+                 system_fpc=getattr(args, "system_fpc", False),
++                static=getattr(args, "static", False),
+             )
+         else:
+             artifact = build_macos(args.release, args.rebuild, lto=args.lto)
+diff --git a/vendor/okgf/CMakeLists.txt b/vendor/okgf/CMakeLists.txt
+index 487cb3b..904610d 100644
+--- a/vendor/okgf/CMakeLists.txt
++++ b/vendor/okgf/CMakeLists.txt
+@@ -28,7 +28,8 @@ if(OKGF_MATH_BACKEND STREQUAL "NATIVE" AND OKGF_PORTABLE_MATH)
+   message(FATAL_ERROR "OKGF_PORTABLE_MATH applies to COMPATIBLE, not NATIVE")
+ endif()
+ message(STATUS "OKGF math backend: ${OKGF_MATH_BACKEND}")
+-add_library(okgf SHARED
++set(OKGF_LIBTYPE SHARED CACHE STRING "OKGF library type: SHARED or STATIC")
++add_library(okgf ${OKGF_LIBTYPE}
+   src/math/precision.c
+   src/cpu.c
+   src/pixels.c

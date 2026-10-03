@@ -2,9 +2,9 @@
 
 This repo provides support for Windows target, as well as QoL fixes to both Linux and Windows target to the [reverse-engineered version of Space Rangers HD](//github.com/pakompom/SpaceRangersHD_FPC) written in FreePascal.
 
-Upstream repo can produce binaries only for MacOS and Linux. This patch rectifies that.
+Upstream repo can produce binaries only for MacOS and Linux. This patch series rectifies that.
 
-This patch can be applied against [5f491a841cbd11d2a9a6861a822a08ffa64d15f2](https://github.com/pakompom/SpaceRangersHD_FPC/tree/5f491a841cbd11d2a9a6861a822a08ffa64d15f2) of the upstream.
+Patches can be applied against [5f491a841cbd11d2a9a6861a822a08ffa64d15f2](https://github.com/pakompom/SpaceRangersHD_FPC/tree/5f491a841cbd11d2a9a6861a822a08ffa64d15f2) of the upstream.
 
 You also need submodules:
 
@@ -17,7 +17,7 @@ Those are located at `vendor/` of the upstream repo.
 
 You bet. I cobbled this together while on vacation, so I barely tested the build. I have fixed all of the crashes I've encountered immediately, but I'm certain that there's a lot of them still lurking beneath.
 
-Resulting binaries have been successfully launched on Windows 10 and 11, Linux Mint 22.1 Xia, Debian Trixie and SteamOS Holo 3.8.16.
+With that said, binaries were confirmed to launch on Windows 10 and 11, Linux Mint 22.1 Xia, Debian Trixie and SteamOS 3.8.28.
 
 # But upstream supports Linux now, doesn't it? Maybe it will support Windows?
 
@@ -29,17 +29,15 @@ I had some extra time, so I decided to patch stuff up.
 
 Apart from build system - mainly SDL integration.
 
-Now we have DPI awareness, proper windowed mode support, integer scaling support, pillar-boxed non-integer scaling, pointer clamping (panning in 2D works now), and so on and so on.
+Now we have DPI awareness, proper windowed mode support, integer scaling support, pillar-boxed non-integer scaling, (mostly) pointer clamping across all modes, and so on and so on.
 
 I have also fixed a couple of crashes that upstream is yet to fix, and added a bit of polish so Steam Deck trackpads would work properly too.
-
-Windows build has some libraries consolidated into one, so that users wouldn't freak out seeing 20+ new dlls in their game folder.
 
 No gameplay or balance changes.
 
 # Cross-platform support details?
 
-Linux and Windows binaries can be built on any modern Ubuntu (24.04+), Linux Mint (22.1 Xia) or Debian (Trixie).
+Linux and Windows binaries can be built on any modern Ubuntu (24.04+), Linux Mint (22.1 Xia) or Debian (Trixie). You cannot build this on Windows yet.
 
 Linux binaries are produced natively, Windows build uses mingw64 to cross-compile. The latter requires an active internet connection to build, sorry for that.
 
@@ -47,7 +45,7 @@ By default, Linux builds use vendored fpc fork, but you can also build them with
 
 I see no reason why this won't build on any other recent Linux, but you'll have to adapt dependencies from below to your distro by yourself. For instance, on Arch or CachyOS you might need to install mingw64 from AUR or extra repos.
 
-NB: macOS builds are untested and unverified. I have no hardware to run them on, nor the desire to debug the build.
+NB: macOS builds are untested and unverified. I have no hardware to run them on, nor the desire to debug the build. I'm sure that I broke a lot of Mac stuff on the way, so if anyone wants to test that and/or ship some fixes - feel free to open a pull request.
 
 # How to apply patch and build?
 
@@ -74,13 +72,21 @@ git checkout --detach 5f491a841cbd11d2a9a6861a822a08ffa64d15f2
 git submodule update --init --recursive
 git -C vendor/fpc checkout --detach 3a1c9cfae7f7a2bb17079b2989f562dbc5728b01
 git -C vendor/okgf checkout --detach c01aa7a168a6f1772541501074b7bba1b96550ef
+cd ..
+```
+- Clone this repo:
+
+```
+git clone https://github.com/giantplaceholder/spacerangershd-fpc-fixes.git
+cp spacerangershd-fpc-fixes/*.patch SpaceRangersHD_FPC/
 ```
 
-- Download `fixes.patch` from this repo and put it into the `SpaceRangersHD_FPC` directory.
+- Apply the patches:
 
-- Run `git apply --check fixes.patch` to see if there's any issues.
-
-- If output is empty, apply the patch: `git apply fixes.patch`
+```
+cd SpaceRangersHD_FPC
+for p in {01..13}-*.patch; do git apply --check "$p" || break; done
+```
 
 Now you can try to build binaries:
 
@@ -88,7 +94,9 @@ Now you can try to build binaries:
 - For Linux, system fpc: `./tools/build.py --target linux --release --system-fpc`
 - For Windows: `./tools/build.py --target windows --release`
 
-NB: an active internet connection is **REQUIRED** for Windows builds to complete, as mingw will download required dependencies. First build might take a while.
+**NB:** an active internet connection is **REQUIRED** for Windows builds to complete, as mingw will download required dependencies. First build might take a while.
+
+**NB:** LTO builds are broken as of now, and static builds are still WIP and largely untested due to their low priority.
 
 If everything compiled OK, binaries will be at:
 

@@ -1,0 +1,93 @@
+diff --git a/platform/SDL2.pas b/platform/SDL2.pas
+index 8f2fa50..cbead7c 100644
+--- a/platform/SDL2.pas
++++ b/platform/SDL2.pas
+@@ -175,9 +175,12 @@ function SDL_GetRenderDriverInfo(
+ procedure SDL_SetMainReady; cdecl; external SDL2Library;
+ function SDL_InitSubSystem(Flags: Cardinal): Integer; cdecl; external SDL2Library;
+ procedure SDL_QuitSubSystem(Flags: Cardinal); cdecl; external SDL2Library;
++procedure SDL_Quit; cdecl; external SDL2Library;
+ function SDL_GetError: PAnsiChar; cdecl; external SDL2Library;
+ function SDL_GetHint(Name: PAnsiChar): PAnsiChar; cdecl; external SDL2Library;
++function SDL_SetHint(Name, Value: PAnsiChar): Integer; cdecl; external SDL2Library;
+ function SDL_GetPerformanceFrequency: QWord; cdecl; external SDL2Library;
++function SDL_GetPerformanceCounter: QWord; cdecl; external SDL2Library;
+ function SDL_GetCPUCount: Integer; cdecl; external SDL2Library;
+ function SDL_GetSystemRAM: Integer; cdecl; external SDL2Library;
+ procedure SDL_free(Data: Pointer); cdecl; external SDL2Library;
+@@ -213,18 +216,25 @@ procedure SDL_SetWindowBordered(
+ ); cdecl; external SDL2Library;
+ procedure SDL_SetWindowSize(Window: PSDL_Window; W, H: Integer); cdecl; external SDL2Library;
+ procedure SDL_GetWindowSize(Window: PSDL_Window; out W, H: Integer); cdecl; external SDL2Library;
++procedure SDL_GetWindowSizeInPixels(Window: PSDL_Window; out W, H: Integer); cdecl; external SDL2Library;
+ function SDL_SetWindowFullscreen(
+     Window: PSDL_Window;
+     Flags: Cardinal
+ ): Integer; cdecl; external SDL2Library;
++procedure SDL_ShowWindow(Window: PSDL_Window); cdecl; external SDL2Library;
++procedure SDL_RestoreWindow(Window: PSDL_Window); cdecl; external SDL2Library;
+ procedure SDL_RaiseWindow(Window: PSDL_Window); cdecl; external SDL2Library;
++function SDL_SetWindowInputFocus(Window: PSDL_Window): Integer; cdecl; external SDL2Library;
+ procedure SDL_SetWindowGrab(Window: PSDL_Window; Grabbed: Integer); cdecl; external SDL2Library;
++function SDL_SetWindowMouseRect(Window: PSDL_Window; Rect: PSDL_Rect): Integer; cdecl; external SDL2Library;
+ procedure SDL_MinimizeWindow(Window: PSDL_Window); cdecl; external SDL2Library;
+ function SDL_GetNumDisplayModes(Display: Integer): Integer; cdecl; external SDL2Library;
+ function SDL_GetDisplayMode(
+     Display, Mode: Integer;
+     out Value: TSDL_DisplayMode
+ ): Integer; cdecl; external SDL2Library;
++function SDL_GetDisplayBounds(Display: Integer; out Rect: TSDL_Rect): Integer; cdecl; external SDL2Library;
++function SDL_GetWindowDisplayIndex(Window: PSDL_Window): Integer; cdecl; external SDL2Library;
+ function SDL_GetCurrentDisplayMode(
+     Display: Integer;
+     out Value: TSDL_DisplayMode
+@@ -235,6 +245,9 @@ function SDL_CreateRenderer(
+     Flags: Cardinal
+ ): PSDL_Renderer; cdecl; external SDL2Library;
+ procedure SDL_DestroyRenderer(Renderer: PSDL_Renderer); cdecl; external SDL2Library;
++function SDL_RenderSetIntegerScale(Renderer: PSDL_Renderer; Enable: Integer): Integer; cdecl; external SDL2Library;
++function SDL_RenderWindowToLogical(Renderer: PSDL_Renderer; WindowX, WindowY: Integer; out LogicalX, LogicalY: Single): Integer; cdecl; external SDL2Library;
++function SDL_RenderLogicalToWindow(Renderer: PSDL_Renderer; LogicalX, LogicalY: Single; out WindowX, WindowY: Integer): Integer; cdecl; external SDL2Library;
+ function SDL_RenderSetLogicalSize(
+     Renderer: PSDL_Renderer;
+     W, H: Integer
+@@ -268,6 +281,7 @@ function SDL_SetRenderTarget(
+     Texture: PSDL_Texture
+ ): Integer; cdecl; external SDL2Library;
+ function SDL_GetRenderTarget(Renderer: PSDL_Renderer): PSDL_Texture; cdecl; external SDL2Library;
++function SDL_GetRendererOutputSize(Renderer: PSDL_Renderer; out W, H: Integer): Integer; cdecl; external SDL2Library;
+ function SDL_RenderSetClipRect(
+     Renderer: PSDL_Renderer;
+     Rect: PSDL_Rect
+diff --git a/platform/TlHelp32.pas b/platform/TlHelp32.pas
+new file mode 100644
+index 0000000..aa9e7b8
+--- /dev/null
++++ b/platform/TlHelp32.pas
+@@ -0,0 +1,26 @@
++{ Delphi-compatible unit name for Tool Help API.
++  FPC already declares the API and types in unit Windows; this unit only
++  aliases Delphi-style names so existing ``uses TlHelp32`` code type-checks
++  against Windows.MODULEENTRY32 (same type identity, no duplicate records). }
++unit TlHelp32;
++
++{$MODE DELPHI}
++
++interface
++
++uses
++  Windows;
++
++type
++  { Same type as Windows.MODULEENTRY32, required for var-parameter matching. }
++  TModuleEntry32 = MODULEENTRY32;
++  PModuleEntry32 = ^TModuleEntry32;
++  TProcessEntry32 = PROCESSENTRY32;
++  PProcessEntry32 = ^TProcessEntry32;
++
++{ Constants and CreateToolhelp32Snapshot / Module32First / Module32Next /
++  Process32First / Process32Next are provided by unit Windows. }
++
++implementation
++
++end.

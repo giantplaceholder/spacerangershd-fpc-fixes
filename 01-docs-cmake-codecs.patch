@@ -1,0 +1,78 @@
+diff --git a/BUILDING.md b/BUILDING.md
+index 92ef727..1ba779c 100644
+--- a/BUILDING.md
++++ b/BUILDING.md
+@@ -2,14 +2,17 @@
+ 
+ ## Requirements
+ 
+-Build natively on Linux x86_64 or macOS ARM64. Linux ARM64 is recognized but unvalidated.
+-Requires Python 3.10+, FPC 3.2.2, GNU Make, CMake 3.20+, pkg-config, and development
++Both Linux native and Windows cross-build can be built natively on Linux x86_64. Builds on macOS are untested and are unverified.
++Linux ARM64 is recognized but unvalidated.
++
++On Linux, build Python 3.10+, FPC 3.2.2, GNU Make, CMake 3.20+, pkg-config, and development
+ libraries for SDL2 2.26+ (or SDL2-compat), libogg, libvorbis, libjpeg, and libpng.
+ 
+-- Linux: C11 compiler and binutils. LLVM builds also require `clang` and `ld.lld` (validated with 22.1.3).
+-- macOS: Xcode command-line tools and Homebrew.
++- Linux: C11 compiler and binutils. Non-venored FPC builds are also possible. LLVM builds also require `clang` and `ld.lld` (validated with 22.1.3).
++- Windows: mingw-w64; host bootstraps vendored FPC and builds it locally, as with Linux by default. Requires quite a lot of memory (4+ gigs of RAM at minimum)
++- macOS: Xcode command-line tools and Homebrew (untested with this fork)
+ 
+-AVI playback needs Xvid: `libxvidcore.so.4` on Linux, `xvidcore` on macOS.
++AVI playback needs Xvid: `libxvidcore.so.4` on Linux and `xvidcore` on macOS.
+ `FPC_BOOTSTRAP` overrides the installed compiler used to bootstrap the pinned FPC.
+ 
+ ## Build and run
+@@ -28,6 +31,10 @@ explicitly. Resources default to `game/` when `--game-dir` is omitted.
+ - `--lto`: Pascal link-time optimization, implying LLVM; unavailable on Android.
+ - `--rebuild`: rebuild all game units and native code (build script only).
+ 
++- `--system-fpc` (Linux): use distro `fpc` instead of the vendored compiler bootstrap.
++  Still needs `vendor/fpc` checked out for package **sources** (paszlib); does not build FPC itself.
++  Output: `.local/linux-system/{debug,release}/bin/Rangers`.
++
+ Use matching `--release`, `--llvm`, and `--lto` options for build and run.
+ Profiles are `debug` or `release`, followed by `-llvm` for Linux LLVM builds
+ and `-lto` when enabled. Compiler/RTL caches live in `.local/fpc/`.
+@@ -36,6 +43,7 @@ and `-lto` when enabled. Compiler/RTL caches live in `.local/fpc/`.
+ | --- | --- |
+ | Linux | `.local/linux-<cpu>/<profile>/bin/`: `Rangers` and `libokgf.so` |
+ | macOS | `.local/<profile>/Space Rangers HD.app` |
++| Windows | `.local/windows-x86_64/<profile>/bin/`: `Rangers.exe`, `okgf.dll` (zlib/png/jpeg static), `SDL2.dll`, and other dependencies |
+ 
+ Linux CPU names are `x86_64` and `aarch64`. Keep the Linux executable and OKGF
+ library together; SDL and codecs remain system dependencies.
+diff --git a/native/CMakeLists.txt b/native/CMakeLists.txt
+index 25a6c4a..7e8ed3e 100644
+--- a/native/CMakeLists.txt
++++ b/native/CMakeLists.txt
+@@ -17,3 +17,27 @@ endif()
+ if(ANDROID)
+   target_link_options(okgf PRIVATE "-Wl,-z,max-page-size=16384")
+ endif()
++
++if(WIN32)
++  # libpng's CMake package still INTERFACE-links shared zlib. Drop that and
++  # link the static archives we pass in from tools/build.py.
++  if(TARGET PNG::PNG)
++    set_property(TARGET PNG::PNG PROPERTY INTERFACE_LINK_LIBRARIES "")
++  endif()
++  if(TARGET ZLIB::ZLIB)
++    set_property(TARGET ZLIB::ZLIB PROPERTY IMPORTED_LOCATION "${ZLIB_LIBRARY}")
++    set_property(TARGET ZLIB::ZLIB PROPERTY INTERFACE_LINK_LIBRARIES "")
++  endif()
++  if(ZLIB_LIBRARY)
++    target_link_libraries(okgf PRIVATE "${ZLIB_LIBRARY}")
++    message(STATUS "OKGF static zlib: ${ZLIB_LIBRARY}")
++  endif()
++  if(PNG_LIBRARY)
++    target_link_libraries(okgf PRIVATE "${PNG_LIBRARY}")
++    message(STATUS "OKGF static png: ${PNG_LIBRARY}")
++  endif()
++  if(JPEG_LIBRARY)
++    target_link_libraries(okgf PRIVATE "${JPEG_LIBRARY}")
++    message(STATUS "OKGF static jpeg: ${JPEG_LIBRARY}")
++  endif()
++endif()

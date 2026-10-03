@@ -1,0 +1,391 @@
+diff --git a/BUILDING.md b/BUILDING.md
+index 4f74e6e..370a821 100644
+--- a/BUILDING.md
++++ b/BUILDING.md
+@@ -30,8 +30,16 @@ explicitly. Resources default to `game/` when `--game-dir` is omitted.
+ - `--llvm`: LLVM backend on Linux; macOS uses LLVM by default.
+ - `--lto`: Pascal link-time optimization, implying LLVM; unavailable on Android.
+ - `--rebuild`: rebuild all game units and native code (build script only).
+-- `--static` (Linux): static-link okgf, jpeg, png, zlib, ogg, and vorbis into `Rangers`.
+-  Copies `libSDL2-2.0.so.0` and `libxvidcore.so.4` next to the binary (`$ORIGIN`).
++- `--static` (Linux): link ogg and vorbis statically into `Rangers`, and link zlib, png and
++  jpeg statically into `libokgf.so`. OKGF stays a separate shared object that `Rangers` loads
++  through `DT_NEEDED`; it is not folded into the executable. `libSDL2-2.0.so.0`,
++  `libxvidcore.so.4` and their transitive non-glibc dependencies are copied next to the binary
++  and located through an inherited `DT_RPATH=$ORIGIN`, so the output directory can be moved
++  as a unit. This is not a static executable: the bundled libraries are copied from the build
++  host (pulseaudio, alsa, X11, wayland, dbus and systemd among them), so running elsewhere
++  needs a host glibc at least as new as the build machine's, and SDL2 backends it loads at
++  runtime (pipewire, Vulkan, udev, GL/EGL) still come from the host.
++  Output: `.local/linux-<cpu>/<profile>-static/bin/`.
+ 
+ - `--system-fpc` (Linux): use distro `fpc` instead of the vendored compiler bootstrap.
+   Still needs `vendor/fpc` checked out for package **sources** (paszlib); does not build FPC itself.
+@@ -48,7 +56,8 @@ and `-lto` when enabled. Compiler/RTL caches live in `.local/fpc/`.
+ | Windows | `.local/windows-x86_64/<profile>/bin/`: `Rangers.exe`, `okgf.dll` (zlib/png/jpeg static), `SDL2.dll`, and other dependencies |
+ 
+ Linux CPU names are `x86_64` and `aarch64`. Keep the Linux executable and OKGF
+-library together; SDL and codecs remain system dependencies.
++library together; SDL and codecs remain system dependencies, except with `--static`, which
++links the codecs in and bundles SDL and its dependencies next to the binary.
+ 
+ ## Formatting
+ 
+diff --git a/tools/build.py b/tools/build.py
+index b694d98..ac7f4a0 100755
+--- a/tools/build.py
++++ b/tools/build.py
+@@ -11,6 +11,7 @@ import resource
+ import shlex
+ import shutil
+ import subprocess
++import struct
+ import zipfile
+ from pathlib import Path
+ 
+@@ -286,12 +287,20 @@ def build_linux(
+         ogg_a = linux_system_archive("libogg.a")
+         vorbis_a = linux_system_archive("libvorbis.a")
+         vorbisfile_a = linux_system_archive("libvorbisfile.a")
++        include = pic / "include"
+         native = build_okgf(
+             work,
+             release,
++            # Headers must come from the same build as the archives below. Left to
++            # CMake it takes distro headers, whose jpeg_decompress_struct layout
++            # differs from our own libjpeg; okgf embeds that struct by value, so a
++            # mismatched pair yields a decoder that rejects every image.
+             f"-DJPEG_LIBRARY={jpeg_a}",
++            f"-DJPEG_INCLUDE_DIR={include}",
+             f"-DPNG_LIBRARY={png_a}",
++            f"-DPNG_PNG_INCLUDE_DIR={include}",
+             f"-DZLIB_LIBRARY={z_a}",
++            f"-DZLIB_INCLUDE_DIR={include}",
+             "-DZLIB_USE_STATIC_LIBS=ON",
+             rebuild=rebuild,
+         )
+@@ -308,6 +317,8 @@ def build_linux(
+         xvid_so = linux_system_shared("libxvidcore.so.4", "libxvidcore.so.4.3")
+         shutil.copy2(sdl_so, libraries / "libSDL2-2.0.so.0")
+         shutil.copy2(xvid_so, libraries / "libxvidcore.so.4")
++        bundle_origin_deps(libraries / "libSDL2-2.0.so.0", libraries)
++        bundle_origin_deps(libraries / "libxvidcore.so.4", libraries)
+     else:
+         native = build_okgf(work, release, rebuild=rebuild)
+         shutil.copy2(native / "libokgf.so", libraries)
+@@ -373,7 +384,10 @@ def build_linux(
+                 "-k-lm",
+                 "-k-ldl",
+                 "-k-lpthread",
+-                "-k--enable-new-dtags",
++                # Legacy DT_RPATH, not DT_RUNPATH: only DT_RPATH is inherited by
++                # the transitive dependencies that SDL2 pulls in (pulse, alsa,
++                # sndfile, X11), which is what makes the bundle relocatable.
++                "-k--disable-new-dtags",
+                 "-k-rpath",
+                 "-k$ORIGIN",
+             ]
+@@ -397,6 +411,7 @@ def build_linux(
+                 "-k-lm",
+                 "-k-ldl",
+                 "-k-lpthread",
++                "-k--disable-new-dtags",
+                 "-k-rpath",
+                 "-k$ORIGIN",
+             ]
+@@ -435,6 +450,9 @@ def build_linux(
+             extra = libraries / name
+             if extra.is_file():
+                 extra.unlink()
++        bundle_origin_deps(binary, libraries)
++        bundle_origin_deps(libraries / "libokgf.so", libraries)
++        make_origin_relocatable(libraries)
+     return binary
+ 
+ 
+@@ -478,6 +496,275 @@ def install_static_ld_wrapper(work: Path, libraries: Path) -> Path:
+     return wrap
+ 
+ 
++
++
++GLIBC_PROVIDED = (
++    "linux-vdso.so.1",
++    "linux-gate.so.1",
++    "ld-linux-x86-64.so.2",
++    "ld-linux.so.2",
++    "libc.so.6",
++    "libm.so.6",
++    "libdl.so.2",
++    "librt.so.1",
++    "libpthread.so.0",
++    "libresolv.so.2",
++    "libutil.so.1",
++    "libnsl.so.1",
++    "libanl.so.1",
++    "libBrokenLocale.so.1",
++    "libthread_db.so.1",
++)
++DT_NULL = 0
++DT_STRTAB = 5
++DT_RPATH = 15
++DT_RUNPATH = 29
++PT_LOAD = 1
++PT_DYNAMIC = 2
++ORIGIN = "$ORIGIN"
++DT_NEEDED = 1
++LIBRARY_DIRS = (
++    "/usr/lib/x86_64-linux-gnu",
++    "/lib/x86_64-linux-gnu",
++    "/usr/lib64",
++    "/usr/lib",
++    "/lib64",
++    "/lib",
++)
++
++
++def elf_segments(data: bytes):
++    """Return the PT_LOAD program headers of an ELF64 little-endian object."""
++    e_phoff = struct.unpack_from("<Q", data, 0x20)[0]
++    (e_phentsize, e_phnum) = struct.unpack_from("<2H", data, 0x36)
++    loads = []
++    for index in range(e_phnum):
++        offset = e_phoff + index * e_phentsize
++        if struct.unpack_from("<I", data, offset)[0] != PT_LOAD:
++            continue
++        (p_offset, p_vaddr, _paddr, p_filesz) = struct.unpack_from("<4Q", data, offset + 8)
++        loads.append((p_vaddr, p_offset, p_filesz))
++    return loads
++
++
++def file_offset(loads, vaddr):
++    """Translate a virtual address, as stored in DT_*, into an offset in the file."""
++    if vaddr is None:
++        return None
++    for (seg_vaddr, seg_offset, seg_filesz) in loads:
++        if seg_vaddr <= vaddr < seg_vaddr + seg_filesz:
++            return seg_offset + (vaddr - seg_vaddr)
++    return None
++
++
++def elf_dynamic(data: bytes):
++    """Return (bytes, dynamic entries, strtab file offset) for an ELF64 LE object.
++
++    PT_DYNAMIC is used instead of SHT_DYNAMIC because a stripped object keeps its
++    program headers but may lose the section header table. DT_* string pointers
++    hold *virtual* addresses, so DT_STRTAB is mapped through PT_LOAD before use.
++    """
++    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
++        return None
++    e_phoff = struct.unpack_from("<Q", data, 0x20)[0]
++    (e_phentsize, e_phnum) = struct.unpack_from("<2H", data, 0x36)
++    span = None
++    for index in range(e_phnum):
++        offset = e_phoff + index * e_phentsize
++        if struct.unpack_from("<I", data, offset)[0] != PT_DYNAMIC:
++            continue
++        (p_offset, _vaddr, _paddr, p_filesz) = struct.unpack_from("<4Q", data, offset + 8)
++        if p_filesz >= 16 and p_offset + p_filesz <= len(data):
++            span = (p_offset, p_offset + p_filesz)
++        break
++    if span is None:
++        return None
++    entries = []
++    for pos in range(span[0], span[1] - 15, 16):
++        (tag, value) = struct.unpack_from("<2Q", data, pos)
++        if tag == DT_NULL:
++            break
++        entries.append((pos, tag, value))
++    strtab = next((value for (_pos, tag, value) in entries if tag == DT_STRTAB), None)
++    return (data, entries, file_offset(elf_segments(data), strtab))
++
++
++def elf_string(data: bytes, strtab, offset: int) -> str:
++    begin = strtab + offset
++    if strtab is None or begin >= len(data):
++        return ""
++    end = data.find(b"\0", begin)
++    return "" if end < 0 else data[begin:end].decode("utf-8", "replace")
++
++
++def ld_so_index() -> dict:
++    """Map SONAME to path via ldconfig so bundling never depends on ldd."""
++    try:
++        report = subprocess.run(
++            ["ldconfig", "-p"], text=True, stdout=subprocess.PIPE,
++            stderr=subprocess.DEVNULL, check=False,
++        ).stdout
++    except OSError:
++        return {}
++    index = {}
++    for line in report.splitlines():
++        if " => " not in line:
++            continue
++        (left, _, path) = line.partition(" => ")
++        name = left.strip().split() and left.strip().split()[0]
++        if name and name not in index and Path(path.strip()).is_file():
++            index[name] = path.strip()
++    return index
++
++
++def search_paths(info, obj: Path) -> list[Path]:
++    """RPATH/RUNPATH of *obj*, with $ORIGIN expanded, as concrete directories."""
++    paths = []
++    if info is None:
++        return paths
++    (data, entries, strtab) = info
++    for (_pos, tag, value) in entries:
++        if tag not in (DT_RPATH, DT_RUNPATH):
++            continue
++        for entry in elf_string(data, strtab, value).split(":"):
++            if not entry:
++                continue
++            expanded = entry.replace(ORIGIN, str(obj.parent))
++            paths.append(Path(expanded))
++    return paths
++
++
++def bundle_origin_deps(binary: Path, dest: Path) -> None:
++    """Copy every non-glibc DT_NEEDED of *binary*, transitively, into *dest*.
++
++    Dependencies are read straight from the ELF dynamic tables rather than from
++    ldd: ldd resolves against the *host*, so on a host that is missing a library
++    it reports "not found" and the walk silently stops. Resolving DT_NEEDED
++    ourselves keeps the bundle complete wherever it is produced.
++    """
++    index = ld_so_index()
++    seen, missing, queue = set(), [], [binary]
++    # Directories where shipped libraries were found; needed because a library
++    # may keep a dependency in its own directory without naming it in an RPATH.
++    found_dirs: list[Path] = [binary.parent]
++    while queue:
++        current = queue.pop()
++        info = elf_dynamic(current.read_bytes()) if current.is_file() else None
++        if info is None:
++            continue
++        (data, entries, strtab) = info
++        own = [*search_paths(info, current), *found_dirs]
++        for (_pos, tag, value) in entries:
++            if tag != DT_NEEDED:
++                continue
++            name = elf_string(data, strtab, value)
++            if not name or name in seen or name in GLIBC_PROVIDED:
++                continue
++            candidates = [dest / name, *[path / name for path in own], *[
++                Path(directory) / name for directory in LIBRARY_DIRS
++            ]]
++            if name in index:
++                candidates.append(Path(index[name]))
++            source = next((path for path in candidates if path.is_file()), None)
++            if source is None:
++                missing.append(name)
++                continue
++            seen.add(name)
++            if source.parent not in found_dirs:
++                found_dirs.append(source.parent)
++            target = dest / source.name
++            if target.resolve() != source.resolve():
++                shutil.copy2(source, target)
++            queue.append(target)
++    if missing:
++        print("Warning: unresolved dependencies while bundling: " + ", ".join(sorted(set(missing))))
++
++
++def make_origin_relocatable(libraries: Path) -> None:
++    """Make *libraries* relocatable without patchelf, using legacy DT_RPATH.
++
++    Two rewrites, both size-preserving so no object is resized or relaid out:
++
++    1. DT_RUNPATH -> DT_RPATH. RUNPATH is consulted only for the object that
++       carries it, so SDL2's transitive dependencies fall back to the host cache.
++       Legacy RPATH accumulates down the whole tree, which is what a
++       self-contained bundle needs.
++    2. An absolute DT_RPATH is rewritten to $ORIGIN when every non-glibc
++       DT_NEEDED of that object is already bundled. glibc searches an object's
++       own RPATH before any inherited one, so libpulse's hard-coded
++       /usr/lib/x86_64-linux-gnu/pulseaudio otherwise wins and pulls
++       libpulsecommon, a private library absent from the ld.so cache, off the
++       host. Rewriting (always a shortening, so in place is safe) makes bin/ the
++       only search directory.
++
++    Objects whose dependencies are not all bundled are left untouched and
++    reported, so the bundle stays loadable rather than being made shorter.
++    """
++    objects = [libraries / "Rangers", *sorted(
++        path for path in libraries.glob("*.so*") if path.is_file() and not path.is_symlink()
++    )]
++    bundled = {path.name for path in libraries.iterdir() if path.is_file()}
++    flipped, rewritten, problems = [], [], []
++    for path in objects:
++        if not path.is_file():
++            continue
++        info = elf_dynamic(path.read_bytes())
++        if info is None:
++            continue
++        (data, entries, strtab) = info
++        rpath = [item for item in entries if item[1] == DT_RPATH]
++        runpath = [item for item in entries if item[1] == DT_RUNPATH]
++        # With both tags present glibc uses DT_RUNPATH for this object's own
++        # imports and still inherits DT_RPATH, so only a lone DT_RUNPATH hurts.
++        if runpath and not rpath:
++            buffer = bytearray(data)
++            struct.pack_into("<Q", buffer, runpath[0][0], DT_RPATH)
++            path.write_bytes(bytes(buffer))
++            flipped.append(path.name)
++            data, rpath = bytes(buffer), [runpath[0]]
++        if path.name == "Rangers" and not any(
++            elf_string(data, strtab, value) == ORIGIN for (_pos, _tag, value) in rpath
++        ):
++            problems.append("Rangers has no DT_RPATH=$ORIGIN; the bundle is not relocatable")
++        for (pos, _tag, value) in rpath:
++            current = elf_string(data, strtab, value)
++            if current == ORIGIN or not current.startswith("/"):
++                continue
++            wanted = [
++                elf_string(data, strtab, val)
++                for (_pos, tag, val) in entries
++                if tag == DT_NEEDED and elf_string(data, strtab, val) not in GLIBC_PROVIDED
++            ]
++            if any(name not in bundled for name in wanted):
++                problems.append(f"{path.name}: keeps RPATH {current!r} (deps not bundled)")
++                continue
++            # In-place is safe only for a shortening write that no other entry shares.
++            if len(current) < len(ORIGIN) or any(
++                item[2] == value and item[0] != pos for item in entries
++            ):
++                problems.append(f"{path.name}: cannot rewrite RPATH {current!r}")
++                continue
++            buffer = bytearray(data)
++            begin = strtab + value
++            # Padding to the original width is essential: assigning a shorter
++            # slice to a bytearray deletes bytes and silently truncates the ELF.
++            payload = ORIGIN.encode()
++            buffer[begin:begin + len(current) + 1] = payload + b"\0" * (len(current) + 1 - len(payload))
++            if len(buffer) != len(data):
++                problems.append(f"{path.name}: refused RPATH rewrite (size would change)")
++                continue
++            path.write_bytes(bytes(buffer))
++            rewritten.append(f"{path.name}: {current} -> {ORIGIN}")
++    if flipped:
++        print(f"Converted DT_RUNPATH to inherited DT_RPATH for {len(flipped)} object(s).")
++    for line in rewritten:
++        print(f"Retargeted RPATH: {line}")
++    if problems:
++        print("Warning: bundle may not be fully relocatable:")
++        for line in sorted(set(problems)):
++            print(f"  {line}")
++
++
+ def linux_system_archive(*names: str) -> Path:
+     roots = (
+         Path("/usr/lib/x86_64-linux-gnu"),
+@@ -1143,7 +1430,8 @@ def main() -> None:
+     parser.add_argument(
+         "--static",
+         action="store_true",
+-        help="Linux: static-link okgf/jpeg/png/zlib/ogg/vorbis; ship SDL2 and xvidcore next to Rangers.",
++        help="Linux: link ogg/vorbis into Rangers and zlib/png/jpeg into libokgf.so; "
++        "bundle SDL2, xvidcore and their dependencies next to the binary.",
+     )
+     args = parser.parse_args()
+     if args.lto and args.target == "android":

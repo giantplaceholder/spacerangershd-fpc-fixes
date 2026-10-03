@@ -1,0 +1,753 @@
+diff --git a/tools/build.py b/tools/build.py
+index 6403970..1c03faf 100755
+--- a/tools/build.py
++++ b/tools/build.py
+@@ -1,7 +1,8 @@
+ #!/usr/bin/env python3
+-"""Build Space Rangers HD for Linux, macOS or Android."""
++"""Build Space Rangers HD for Linux, macOS, Windows, or Android."""
+ 
+ import argparse
++import hashlib
+ import json
+ import os
+ import plistlib
+@@ -13,13 +14,26 @@ import subprocess
+ import zipfile
+ from pathlib import Path
+ 
+-from compiler import prepare_compiler
++from compiler import prepare_compiler, prepare_windows_cross
+ from targets import desktop_directory, desktop_target
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ PASCAL_FLAGS = ("-Mdelphi", "-FcUTF8")
+ 
+ 
++
++def mingw_safe_dir(path: Path) -> Path:
++    """CMake/windres Makefiles break on spaces and parentheses in the path."""
++    text = str(path)
++    if not any(ch in text for ch in " ()[]{}&;!$`"):
++        return path
++    alt = Path("/tmp") / ("srhd-mingw-" + hashlib.sha1(text.encode()).hexdigest()[:12])
++    alt.mkdir(parents=True, exist_ok=True)
++    print(f"Using scratch dir {alt} (path contains shell-special characters)", flush=True)
++    return alt
++
++
++
+ def require_tool(name: str) -> Path:
+     path = shutil.which(name)
+     if path is None:
+@@ -126,19 +140,27 @@ def pascal_flags(release: bool, *platform_paths: Path) -> list[str]:
+         ROOT / "vendor/fpc/packages/oggvorbis/src",
+         ROOT / "vendor/fpc/packages/fcl-image/src",
+         ROOT / "vendor/fpc/packages/pasjpeg/src",
++        ROOT / "vendor/fpc/packages/fcl-base/src",
++        ROOT / "vendor/fpc/packages/fcl-registry/src",
++        ROOT / "vendor/fpc/packages/winunits-base/src",
+         ROOT / "source",
+         *sorted(path for path in (ROOT / "source").rglob("*") if path.is_dir()),
+     ]
+-    return [
++    flags = [
+         *PASCAL_FLAGS,
+         "-O4" if release else "-O2",
+         # -O4 enables field reordering and fast math; override it afterward.
+         "-OoNOORDERFIELDS",
+         "-OoNOFASTMATH",
+-        "-gl",
+         f"-Fi{ROOT / 'source'}",
+         *(f"-Fu{path}" for path in search_paths),
+     ]
++    if release:
++        # Strip debug at link time; smart-link unused units/symbols (much smaller binary).
++        flags += ["-Xs", "-XX", "-CX"]
++    else:
++        flags.append("-gl")
++    return flags
+ 
+ 
+ def build_paszlib(
+@@ -210,10 +232,20 @@ def build_macos(release: bool, rebuild: bool = False, *, lto: bool = False) -> P
+ 
+ 
+ def build_linux(
+-    release: bool, rebuild: bool = False, *, llvm: bool = False, lto: bool = False
++    release: bool,
++    rebuild: bool = False,
++    *,
++    llvm: bool = False,
++    lto: bool = False,
++    system_fpc: bool = False,
+ ) -> Path:
+     llvm = llvm or lto
++    if system_fpc and llvm:
++        raise ValueError("--system-fpc cannot be combined with --llvm/--lto")
+     work = desktop_directory(ROOT, "linux", release, lto, llvm=llvm)
++    if system_fpc:
++        # Keep system builds out of the vendored-compiler profile paths.
++        work = ROOT / ".local" / "linux-system" / ("release" if release else "debug")
+     libraries, units = (work / name for name in ("bin", "units"))
+     for directory in (libraries, units):
+         directory.mkdir(parents=True, exist_ok=True)
+@@ -229,26 +261,476 @@ def build_linux(
+     )
+     native = build_okgf(work, release, rebuild=rebuild)
+     shutil.copy2(native / "libokgf.so", libraries)
+-    compiler, compiler_flags = prepare_compiler("linux", run_step, llvm=llvm, lto=lto)
+-    if llvm:
+-        # FPC's LLVM exception runtime uses libgcc; -n disables system fpc.cfg.
+-        libgcc = Path(output("clang", "-print-libgcc-file-name"))
+-        if not libgcc.is_file():
+-            raise FileNotFoundError("Clang cannot locate libgcc; install the GCC runtime.")
+-        compiler_flags += [f"-Fl{libgcc.parent}"]
++    if system_fpc:
++        compiler = require_tool("fpc")
++        # Prefer the native code generator; use system unit paths from fpc.cfg.
++        compiler_flags = ["-Tlinux"]
++        # System FPC 3.2.x can internal-error on large units at high -O; keep -O1.
++        opt = ["-O1"] if release else ["-O1", "-gl"]
++    else:
++        compiler, compiler_flags = prepare_compiler("linux", run_step, llvm=llvm, lto=lto)
++        opt = []
++        if llvm:
++            # FPC's LLVM exception runtime uses libgcc; -n disables system fpc.cfg.
++            libgcc = Path(output("clang", "-print-libgcc-file-name"))
++            if not libgcc.is_file():
++                raise FileNotFoundError("Clang cannot locate libgcc; install the GCC runtime.")
++            compiler_flags += [f"-Fl{libgcc.parent}"]
+     paszlib = build_paszlib(work, compiler, compiler_flags, rebuild)
+     # CMake finds C libraries; FPC needs the corresponding native search paths.
+     library_flags = shlex.split(output("pkg-config", "--libs-only-L", "sdl2", "vorbisfile"))
++    flags = list(pascal_flags(release, paszlib))
++    if system_fpc:
++        # Drop aggressive -O4 and debug from pascal_flags for system compiler.
++        flags = [f for f in flags if not f.startswith("-O") and f not in ("-g", "-gl", "-gw")]
++        flags = opt + flags
++        # Avoid vendored fcl-image/pasjpeg (3.3.x sources) with system 3.2.2 units.
++        drop = {
++            str(ROOT / "vendor/fpc/packages/fcl-image/src"),
++            str(ROOT / "vendor/fpc/packages/pasjpeg/src"),
++            str(ROOT / "vendor/fpc/packages/fcl-base/src"),
++            str(ROOT / "vendor/fpc/packages/fcl-registry/src"),
++            str(ROOT / "vendor/fpc/packages/winunits-base/src"),
++        }
++        flags = [f for f in flags if not any(d in f for d in drop)]
++    else:
++        flags = [*compiler_flags, *flags]
+     compile_pascal(work, [
+-        compiler, *compiler_flags, *pascal_flags(release, paszlib),
++        compiler, *([] if system_fpc else compiler_flags if not opt else []),
++        *flags,
+         f"-FU{units}", f"-FE{libraries}", f"-Fl{libraries}",
+         *("-Fl" + flag[2:] for flag in library_flags),
+         # LLD resolves command-line -l before FPC's script SEARCH_DIR entries.
+         # FPC reparses -k options; quote the whole linker argument for spaced paths.
+         f'-k"-L{libraries}"', "-k-lokgf", "-k--enable-new-dtags", "-k-rpath", "-k$ORIGIN",
+         ROOT / "source/Rangers.dpr",
++    ] if not system_fpc else [
++        compiler, *compiler_flags, *flags,
++        f"-FU{units}", f"-FE{libraries}", f"-Fl{libraries}",
++        *("-Fl" + flag[2:] for flag in library_flags),
++        f'-k"-L{libraries}"', "-k-lokgf", "-k-rpath", "-k$ORIGIN",
++        "-k-lSDL2", "-k-lm", "-k-ldl", "-k-lpthread",
++        ROOT / "source/Rangers.dpr",
+     ], rebuild)  # fmt: skip
+-    return libraries / "Rangers"
++    binary = libraries / "Rangers"
++    if not binary.is_file():
++        raise FileNotFoundError(f"Expected binary at {binary}")
++    binary.chmod(binary.stat().st_mode | 0o111)
++    if release:
++        strip = shutil.which("strip")
++        if strip:
++            subprocess.run([strip, "--strip-unneeded", str(binary)], check=False)
++            so = libraries / "libokgf.so"
++            if so.is_file():
++                subprocess.run([strip, "--strip-unneeded", str(so)], check=False)
++    return binary
++
++
++
++def build_mingw_image_deps(work: Path) -> Path:
++    import tarfile, urllib.request
++    prefix_dir = work / 'mingw-deps'
++    stamp = prefix_dir / '.stamp'
++    if stamp.is_file() and stamp.read_text().strip() == 'okgf-static-5' and (prefix_dir / 'lib').is_dir():
++        return prefix_dir
++    gcc = require_tool('x86_64-w64-mingw32-gcc')
++    prefix_dir.mkdir(parents=True, exist_ok=True)
++    src_root = mingw_safe_dir(work) / 'mingw-deps-src'
++    src_root.mkdir(parents=True, exist_ok=True)
++    def run(cmd, cwd):
++        subprocess.run([str(c) for c in cmd], cwd=cwd, check=True)
++    zver = '1.3.1'
++    zdir = src_root / f'zlib-{zver}'
++    if not zdir.is_dir():
++        za = src_root / f'zlib-{zver}.tar.gz'
++        if not za.is_file():
++            print(f'Downloading zlib {zver}…', flush=True)
++            urllib.request.urlretrieve(f'https://github.com/madler/zlib/releases/download/v{zver}/zlib-{zver}.tar.gz', za)
++        with tarfile.open(za) as tf: tf.extractall(src_root)
++    run(['cmake','-S',str(zdir),'-B',str(zdir/'build'),'-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64',f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={require_tool("x86_64-w64-mingw32-g++")}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DBUILD_SHARED_LIBS=OFF'], src_root)
++    run(['cmake','--build',str(zdir/'build'),'-j1'], src_root)
++    run(['cmake','--install',str(zdir/'build')], src_root)
++    for leftover in list(prefix_dir.rglob('zlib*.dll')) + list(prefix_dir.rglob('libzlib*.dll')) + list(prefix_dir.rglob('libz.dll')):
++        leftover.unlink()
++        print(f'Removed leftover {leftover.name} so OKGF cannot import it', flush=True)
++    pver = '1.6.43'
++    pdir = src_root / f'libpng-{pver}'
++    if not pdir.is_dir():
++        pa = src_root / f'libpng-{pver}.tar.gz'
++        if not pa.is_file():
++            print(f'Downloading libpng {pver}…', flush=True)
++            urllib.request.urlretrieve(f'https://download.sourceforge.net/libpng/libpng-{pver}.tar.gz', pa)
++        with tarfile.open(pa) as tf: tf.extractall(src_root)
++    run(['cmake','-S',str(pdir),'-B',str(pdir/'build'),'-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64',f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={require_tool("x86_64-w64-mingw32-g++")}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}',f'-DCMAKE_PREFIX_PATH={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DPNG_SHARED=OFF','-DPNG_STATIC=ON','-DPNG_TESTS=OFF','-DBUILD_SHARED_LIBS=OFF'], src_root)
++    run(['cmake','--build',str(pdir/'build'),'-j1'], src_root)
++    run(['cmake','--install',str(pdir/'build')], src_root)
++    jver = '3.0.3'
++    jdir = src_root / f'libjpeg-turbo-{jver}'
++    if not jdir.is_dir():
++        ja = src_root / f'libjpeg-turbo-{jver}.tar.gz'
++        if not ja.is_file():
++            print(f'Downloading libjpeg-turbo {jver}…', flush=True)
++            urllib.request.urlretrieve(f'https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/{jver}/libjpeg-turbo-{jver}.tar.gz', ja)
++        with tarfile.open(ja) as tf: tf.extractall(src_root)
++    run(['cmake','-S',str(jdir),'-B',str(jdir/'build'),'-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64',f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={require_tool("x86_64-w64-mingw32-g++")}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DENABLE_SHARED=OFF','-DENABLE_STATIC=ON','-DBUILD_SHARED_LIBS=OFF'], src_root)
++    run(['cmake','--build',str(jdir/'build'),'-j1'], src_root)
++    run(['cmake','--install',str(jdir/'build')], src_root)
++    for leftover in prefix_dir.rglob('*.dll'):
++        leftover.unlink()
++        print(f'Removed {leftover.name} from mingw-deps (OKGF uses static .a only)', flush=True)
++    stamp.write_text('okgf-static-5')
++    return prefix_dir
++
++
++
++def copy_mingw_runtime_dlls(libraries: Path) -> None:
++    """Ship libgcc / winpthread next to Rangers.exe (required by MinGW-linked code)."""
++    gcc = require_tool("x86_64-w64-mingw32-gcc")
++    for name in (
++        "libgcc_s_seh-1.dll",
++        "libwinpthread-1.dll",
++        "libstdc++-6.dll",
++        "libssp-0.dll",
++    ):
++        printed = subprocess.check_output(
++            [str(gcc), f"-print-file-name={name}"], text=True
++        ).strip()
++        src = Path(printed)
++        if not src.is_file() or src.name != name:
++            # print-file-name returns the name unchanged when missing
++            continue
++        dest = libraries / name
++        if not dest.is_file() or dest.stat().st_mtime < src.stat().st_mtime:
++            shutil.copy2(src, dest)
++            print(f"Copied MinGW runtime {name}", flush=True)
++
++
++def build_mingw_ogg_vorbis(work: Path) -> Path:
++    import re
++    """Build libogg + libvorbis for MinGW; install DLLs under names FPC expects.
++
++    FPC packages/oggvorbis on Windows use DYNLINK with:
++      ogglib.dll, vorbis.dll, vorbisfile.dll, vorbisenc.dll
++    """
++    import tarfile
++    import urllib.request
++
++    prefix_dir = work / "mingw-oggvorbis"
++    stamp = prefix_dir / ".stamp"
++    need = ("ogg.dll", "libvorbis.dll", "vorbisfile.dll")
++    if stamp.is_file() and stamp.read_text().strip() == "shared-8" and all((prefix_dir / "bin" / n).is_file() for n in need):
++        return prefix_dir
++    gcc = require_tool("x86_64-w64-mingw32-gcc")
++    prefix_dir.mkdir(parents=True, exist_ok=True)
++    src_root = mingw_safe_dir(work) / "mingw-oggvorbis-src"
++    src_root.mkdir(parents=True, exist_ok=True)
++    bin_dir = prefix_dir / "bin"
++    lib_dir = prefix_dir / "lib"
++    bin_dir.mkdir(parents=True, exist_ok=True)
++    lib_dir.mkdir(parents=True, exist_ok=True)
++
++    def run(cmd, cwd):
++        subprocess.run([str(c) for c in cmd], cwd=cwd, check=True)
++
++    # libogg
++    over = "1.3.5"
++    odir = src_root / f"libogg-{over}"
++    if not odir.is_dir():
++        oa = src_root / f"libogg-{over}.tar.gz"
++        if not oa.is_file():
++            print(f"Downloading libogg {over}…", flush=True)
++            urllib.request.urlretrieve(
++                f"https://downloads.xiph.org/releases/ogg/libogg-{over}.tar.gz", oa
++            )
++        with tarfile.open(oa) as tf:
++            tf.extractall(src_root)
++    gxx = require_tool("x86_64-w64-mingw32-g++")
++    windres = shutil.which("x86_64-w64-mingw32-windres") or str(gcc)
++    cross = [
++        "-DCMAKE_SYSTEM_NAME=Windows",
++        "-DCMAKE_SYSTEM_PROCESSOR=x86_64",
++        f"-DCMAKE_C_COMPILER={gcc}",
++        f"-DCMAKE_CXX_COMPILER={gxx}",
++        f"-DCMAKE_RC_COMPILER={windres}",
++        f"-DCMAKE_ASM_COMPILER={gcc}",
++        "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
++    ]
++    run([
++        "cmake", "-S", str(odir), "-B", str(odir / "build"),
++        *cross,
++        f"-DCMAKE_INSTALL_PREFIX={prefix_dir}",
++        "-DCMAKE_BUILD_TYPE=Release",
++        "-DBUILD_SHARED_LIBS=ON",
++        "-DCMAKE_SHARED_LIBRARY_PREFIX=",
++        "-DINSTALL_DOCS=OFF",
++    ], src_root)
++    run(["cmake", "--build", str(odir / "build"), "-j1"], src_root)
++    run(["cmake", "--install", str(odir / "build")], src_root)
++
++    # libvorbis
++    vver = "1.3.7"
++    vdir = src_root / f"libvorbis-{vver}"
++    if not vdir.is_dir():
++        va = src_root / f"libvorbis-{vver}.tar.gz"
++        if not va.is_file():
++            print(f"Downloading libvorbis {vver}…", flush=True)
++            urllib.request.urlretrieve(
++                f"https://downloads.xiph.org/releases/vorbis/libvorbis-{vver}.tar.gz", va
++            )
++        with tarfile.open(va) as tf:
++            tf.extractall(src_root)
++    # MinGW ld rejects MSVC-style win32/*.def (syntax error). Drop them and
++    # export symbols via --export-all-symbols instead.
++    for def_file in (vdir / "win32").glob("*.def") if (vdir / "win32").is_dir() else []:
++        def_file.unlink()
++        print(f"Removed {def_file.name} (incompatible with MinGW ld)", flush=True)
++    for cmake_list in vdir.rglob("CMakeLists.txt"):
++        text = cmake_list.read_text(errors="replace")
++        patched = re.sub(
++            r"[^\n]*win32/vorbis(enc|file)?\.def[^\n]*\n?",
++            "",
++            text,
++        )
++        patched = re.sub(
++            r"[^\n]*vorbis(enc|file)?\.def[^\n]*\n?",
++            "",
++            patched,
++        )
++        if patched != text:
++            cmake_list.write_text(patched)
++            print(f"Patched {cmake_list.relative_to(vdir)} to drop .def sources", flush=True)
++    cross_vorbis = list(cross) + [
++        "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,--export-all-symbols",
++    ]
++    run([
++        "cmake", "-S", str(vdir), "-B", str(vdir / "build"),
++        *cross_vorbis,
++        f"-DCMAKE_INSTALL_PREFIX={prefix_dir}",
++        f"-DCMAKE_PREFIX_PATH={prefix_dir}",
++        "-DCMAKE_BUILD_TYPE=Release",
++        "-DBUILD_SHARED_LIBS=ON",
++        "-DCMAKE_SHARED_LIBRARY_PREFIX=",
++    ], src_root)
++    run(["cmake", "--build", str(vdir / "build"), "-j1"], src_root)
++    run(["cmake", "--install", str(vdir / "build")], src_root)
++
++    # names those files. Do not ship lib*.dll copies.
++    produced = {}
++    for folder in (bin_dir, lib_dir, prefix_dir):
++        if folder.is_dir():
++            for dll in folder.rglob("*.dll"):
++                produced[dll.name.lower()] = dll
++    # Rangers.exe -> vorbisfile.dll -> libvorbis.dll -> ogg.dll
++    canon = {
++        "ogg.dll": ("ogg.dll", "libogg.dll", "libogg-0.dll", "ogglib.dll"),
++        "libvorbis.dll": ("libvorbis.dll", "libvorbis-0.dll", "vorbis.dll"),
++        "vorbisfile.dll": ("vorbisfile.dll", "libvorbisfile.dll", "libvorbisfile-3.dll"),
++    }
++    for dest_name, names in canon.items():
++        src = next((produced[n] for n in names if n in produced), None)
++        if src is None:
++            raise FileNotFoundError(
++                f"No DLL to ship as {dest_name}; have: " + ", ".join(sorted(produced))
++            )
++        dest = bin_dir / dest_name
++        if dest.resolve() != src.resolve():
++            shutil.copy2(src, dest)
++        for extra in names:
++            if extra == dest_name:
++                continue
++            junk = bin_dir / extra
++            if junk.is_file() and junk.resolve() != dest.resolve():
++                junk.unlink()
++    stamp.write_text("shared-8")
++    return prefix_dir
++
++
++
++def prepare_static_oggvorbis_units(work: Path) -> Path:
++    """Copy FPC ogg/vorbis headers with DYNLINK disabled so they $LINKLIB static .a files."""
++    src = ROOT / "vendor/fpc/packages/oggvorbis/src"
++    dest = work / "oggvorbis-static-units"
++    dest.mkdir(parents=True, exist_ok=True)
++    for name in ("ogg.pas", "vorbis.pas"):
++        text = (src / name).read_text(errors="replace")
++        text = text.replace(
++            "{$IFDEF WINDOWS}\n  {$DEFINE DYNLINK}\n{$ENDIF}",
++            "{ Windows: static-link MinGW libogg/libvorbis instead of DLLs }",
++        )
++        # also catch slightly different whitespace
++        if "{$DEFINE DYNLINK}" in text:
++            text = text.replace("{$DEFINE DYNLINK}", "{$DEFINE STATICLINK_OGGVORBIS}")
++        (dest / name).write_text(text)
++    return dest
++
++
++def fetch_sdl2_mingw(work: Path) -> Path:
++    import urllib.request, zipfile
++    dest = work / 'sdl2-mingw'
++    marker = dest / '.version'
++    version = '2.30.2'
++    tree = dest / f'SDL2-{version}' / 'x86_64-w64-mingw32'
++    if marker.is_file() and marker.read_text().strip() == version and tree.is_dir():
++        return tree
++    dest.mkdir(parents=True, exist_ok=True)
++    archive = work / f'SDL2-devel-{version}-mingw.zip'
++    url = f'https://github.com/libsdl-org/SDL/releases/download/release-{version}/SDL2-devel-{version}-mingw.zip'
++    if not archive.is_file():
++        print(f'Downloading {url}…', flush=True)
++        urllib.request.urlretrieve(url, archive)
++    with zipfile.ZipFile(archive) as zf: zf.extractall(dest)
++    if not tree.is_dir():
++        roots = list(dest.glob('SDL2-*'))
++        if not roots: raise FileNotFoundError('SDL2 mingw archive layout unexpected')
++        tree = roots[0] / 'x86_64-w64-mingw32'
++    if not tree.is_dir(): raise FileNotFoundError(tree)
++    marker.write_text(version)
++    return tree
++
++def build_windows(release: bool, rebuild: bool = False) -> Path:
++    require_tool('cmake')
++    prefix = 'x86_64-w64-mingw32-'
++    for tool in ('gcc', 'g++', 'ld', 'strip', 'ar'):
++        if shutil.which(prefix + tool) is None:
++            raise FileNotFoundError(f'Missing {prefix}{tool}; install mingw-w64.')
++    work = desktop_directory(ROOT, 'windows', release)
++    libraries, units = (work / name for name in ('bin', 'units'))
++    for directory in (libraries, units):
++        directory.mkdir(parents=True, exist_ok=True)
++    mingw_gcc = Path(shutil.which(prefix + 'gcc'))
++    implib = work / 'lib'
++    implib.mkdir(parents=True, exist_ok=True)
++    deps = build_mingw_image_deps(work)
++    ov = build_mingw_ogg_vorbis(work)
++    windres = shutil.which(prefix + 'windres') or str(mingw_gcc)
++    libdir = deps / 'lib'
++    def first_a(*names):
++        for n in names:
++            cand = libdir / n
++            if cand.is_file():
++                return cand
++        for n in names:
++            hits = list(libdir.glob(n))
++            if hits:
++                return hits[0]
++        return None
++    zlib_a = first_a('libz.a', 'libzlibstatic.a', 'libzlib.a')
++    png_a = first_a('libpng16.a', 'libpng.a', 'libpng16_static.a')
++    jpeg_a = first_a('libjpeg.a', 'libturbojpeg.a')
++    if zlib_a is None:
++        raise FileNotFoundError(f'Static zlib archive not found under {libdir}')
++    # ld splits -L on spaces; keep link inputs on a path without parentheses.
++    link_dir = mingw_safe_dir(work) / "link"
++    link_dir.mkdir(parents=True, exist_ok=True)
++    if zlib_a.is_file():
++        shutil.copy2(zlib_a, link_dir / "libz.a")
++    native = build_okgf(work, release,
++        '-DCMAKE_SYSTEM_NAME=Windows', '-DCMAKE_SYSTEM_PROCESSOR=x86_64', f'-DCMAKE_C_COMPILER={mingw_gcc}',
++        f'-DCMAKE_RC_COMPILER={windres}', f'-DCMAKE_PREFIX_PATH={deps}',
++        f'-DCMAKE_FIND_ROOT_PATH={deps}',
++        '-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER',
++        '-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH',
++        '-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH',
++        '-DCMAKE_FIND_LIBRARY_SUFFIXES=.a',
++        f'-DZLIB_LIBRARY={zlib_a}',
++        f'-DZLIB_INCLUDE_DIR={deps / "include"}',
++        '-DZLIB_USE_STATIC_LIBS=ON',
++        *([f'-DPNG_LIBRARY={png_a}', f'-DPNG_PNG_INCLUDE_DIR={deps / "include"}'] if png_a else []),
++        *([f'-DJPEG_LIBRARY={jpeg_a}', f'-DJPEG_INCLUDE_DIR={deps / "include"}'] if jpeg_a else []),
++        '-DCMAKE_C_FLAGS=-Wno-error -Wno-pedantic',
++        f'-DCMAKE_SHARED_LINKER_FLAGS=-static-libgcc -L{link_dir} -lz',
++        rebuild=rebuild)
++    dll_candidates = list(native.rglob('okgf.dll')) + list(native.rglob('libokgf.dll'))
++    if not dll_candidates:
++        raise FileNotFoundError(f'okgf.dll not found under {native}')
++    shutil.copy2(dll_candidates[0], libraries / 'okgf.dll')
++    for name in ('libokgf.dll.a', 'libokgf.a'):
++        for imp in native.rglob(name):
++            shutil.copy2(imp, implib / name)
++            break
++    sdl_root = fetch_sdl2_mingw(work)
++    sdl_lib = sdl_root / 'lib'
++    if (sdl_root / 'bin' / 'SDL2.dll').is_file():
++        shutil.copy2(sdl_root / 'bin' / 'SDL2.dll', libraries / 'SDL2.dll')
++    # Vorbis/ogg only (image codecs live inside okgf.dll).
++    for src_root in (ov / "bin", ov / "lib"):
++        if not src_root.is_dir():
++            continue
++        for dll in src_root.glob("*.dll"):
++            shutil.copy2(dll, libraries / dll.name)
++    def alias(src_names, dest_names):
++        src = None
++        for n in src_names:
++            pth = libraries / n
++            if pth.is_file():
++                src = pth
++                break
++            for cand in libraries.glob(n):
++                src = cand
++                break
++        if src is None:
++            for root in (deps / "bin", deps / "lib"):
++                if not root.is_dir():
++                    continue
++                for n in src_names:
++                    hits = list(root.glob(n))
++                    if hits:
++                        src = hits[0]
++                        break
++                if src:
++                    break
++        if src is None:
++            return
++        for dest in dest_names:
++            dst = libraries / dest
++            if dst.exists() and dst.resolve() == src.resolve():
++                continue
++            if not dst.is_file():
++                shutil.copy2(src, dst)
++                print(f"Aliased {src.name} → {dest}", flush=True)
++    alias(["ogg.dll", "libogg.dll", "libogg-0.dll"], ["ogg.dll"])
++    alias(["libvorbis.dll", "libvorbis-0.dll", "vorbis.dll"], ["libvorbis.dll"])
++    alias(["vorbisfile.dll", "libvorbisfile.dll", "libvorbisfile-3.dll"], ["vorbisfile.dll"])
++
++    compiler, compiler_flags, _wu = prepare_windows_cross(run_step)
++    paszlib = build_paszlib(work, compiler, compiler_flags, rebuild)
++    flags = list(pascal_flags(release, paszlib))
++    drop = {str(ROOT / 'vendor/fpc/packages/pthreads/src')}  # Unix-only; keep fcl-image/pasjpeg for vendored FPC
++    flags = [f for f in flags if not any(d in f for d in drop)]
++    ov_units = prepare_static_oggvorbis_units(work)
++    # Prefer static-link copies over vendor DYNLINK units.
++    flags = [f for f in flags if 'oggvorbis' not in f]
++    flags.insert(0, f'-Fu{ov_units}')
++    exe = libraries / 'Rangers.exe'
++    cmd = [compiler, *compiler_flags, *flags, f'-FU{units}', f'-FE{libraries}', f'-Fl{libraries}', f'-Fl{implib}', f'-Fl{sdl_lib}',
++        f'-Fl{ov / "lib"}', f'-k"-L{ov / "lib"}"',
++        f'-k"-L{libraries}"', f'-k"-L{implib}"', f'-k"-L{sdl_lib}"', '-k-lokgf', '-k-lSDL2',
++        '-k-lvorbisfile', '-k-lvorbis', '-k-logg',
++        '-k-static-libgcc',
++        '-k-lws2_32', '-k-lwinmm', '-k-limm32', '-k-lversion', '-k-lole32', '-k-loleaut32',
++        '-k-lgdi32', '-k-luser32', '-k-lkernel32', '-k-lshell32', '-k-ladvapi32',
++        f'-o{exe}', ROOT / 'source/Rangers.dpr']
++    compile_pascal(work, cmd, rebuild)
++    if not exe.is_file():
++        alt = libraries / 'Rangers'
++        if alt.is_file(): alt.rename(exe)
++    if not exe.is_file():
++        raise FileNotFoundError(f'Expected {exe}')
++    if release:
++        strip = shutil.which(prefix + 'strip')
++        if strip:
++            subprocess.run([strip, '--strip-unneeded', str(exe)], check=False)
++            so = libraries / 'okgf.dll'
++            if so.is_file(): subprocess.run([strip, '--strip-unneeded', str(so)], check=False)
++    keep = {
++        'Rangers.exe', 'okgf.dll', 'SDL2.dll',
++        'vorbisfile.dll', 'libvorbis.dll', 'ogg.dll',
++    }
++    for extra in list(libraries.iterdir()):
++        if extra.is_file() and extra.name not in keep:
++            extra.unlink()
++            print(f'Removed unpackaged {extra.name}', flush=True)
++    return exe
+ 
+ 
+ def latest_sdk_directory(parent: Path, prefix: str = "") -> Path:
+@@ -397,9 +879,14 @@ def sign_android_apk(work: Path, unsigned: Path, sdk_tools: Path, java: Path) ->
+ 
+ def main() -> None:
+     parser = argparse.ArgumentParser(description=__doc__)
+-    parser.add_argument("--target", choices=("linux", "macos", "android"), default=desktop_target())
++    parser.add_argument("--target", choices=("linux", "macos", "android", "windows"), default=desktop_target())
+     parser.add_argument("--release", action="store_true", help="Build an optimized release.")
+     parser.add_argument("--llvm", action="store_true", help="Use the LLVM backend on Linux.")
++    parser.add_argument(
++        "--system-fpc",
++        action="store_true",
++        help="Linux: use system fpc (no vendored compiler bootstrap).",
++    )
+     parser.add_argument("--lto", action="store_true", help="Enable LLVM LTO (Linux or macOS).")
+     parser.add_argument(
+         "--rebuild", action="store_true", help="Rebuild all game units and native code."
+@@ -415,8 +902,13 @@ def main() -> None:
+         resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, desired), hard))
+         if args.target == "android":
+             artifact = build_android(args.release, args.rebuild)
++        elif args.target == "windows":
++            artifact = build_windows(args.release, args.rebuild)
+         elif args.target == "linux":
+-            artifact = build_linux(args.release, args.rebuild, llvm=args.llvm, lto=args.lto)
++            artifact = build_linux(
++                args.release, args.rebuild, llvm=args.llvm, lto=args.lto,
++                system_fpc=getattr(args, "system_fpc", False),
++            )
+         else:
+             artifact = build_macos(args.release, args.rebuild, lto=args.lto)
+     except subprocess.CalledProcessError as error:
+diff --git a/tools/compiler.py b/tools/compiler.py
+index 8284213..5b13202 100644
+--- a/tools/compiler.py
++++ b/tools/compiler.py
+@@ -10,7 +10,21 @@ from targets import linux_cpu
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ VENDOR = ROOT / "vendor/fpc"
+-WORK = ROOT / ".local/fpc"
++
++
++def _compiler_work() -> Path:
++    # FPC makefiles pass paths through unquoted $(MAKE) -C. Parentheses/spaces
++    # in the repo path (e.g. "Foo (copy)") become an empty -C argument.
++    text = str(ROOT)
++    if any(ch in text for ch in " ()[]{}&;!$`"):
++        path = Path("/tmp") / ("srhd-fpc-" + hashlib.sha1(text.encode()).hexdigest()[:12])
++    else:
++        path = ROOT / ".local" / "fpc"
++    path.mkdir(parents=True, exist_ok=True)
++    return path
++
++
++WORK = _compiler_work()
+ SOURCE = WORK / "source"
+ LLVM_FLAGS = ("-Clv17.0",)
+ 
+@@ -140,3 +154,94 @@ def prepare_compiler(
+         *(f"-Fu{path}" for path in paths),
+         f"-Fi{packages}/fcl-process/src/unix",
+     ]  # fmt: skip
++
++
++def prepare_windows_cross(run_step) -> tuple[Path, list[str], Path]:
++    """Vendored FPC host compiler + matching win64 RTL (MinGW-w64 binutils).
++
++    Uses the same pinned compiler sources as Linux builds so package units
++    (fcl-base, fcl-registry, …) match the compiler version. No system FPC
++    3.2.2 / compatibility shims.
++    """
++    # Native Linux code generator from the vendored tree (no LLVM required).
++    host_compiler, _host_flags = prepare_compiler("linux", run_step, llvm=False, lto=False)
++    make = shutil.which("gmake") or shutil.which("make")
++    if make is None:
++        raise FileNotFoundError("Install GNU Make to build the win64 runtime.")
++    prefix = "x86_64-w64-mingw32-"
++    for tool in ("gcc", "ld", "as", "ar", "strip"):
++        if shutil.which(prefix + tool) is None:
++            raise FileNotFoundError(
++                f"Missing {prefix}{tool}; install mingw-w64 (gcc-mingw-w64-x86-64)."
++            )
++    cross_bin = Path(shutil.which(prefix + "ld")).parent
++    host_cpu = linux_cpu()
++    source = WORK / f"{host_cpu}-linux" / "source"
++    if not (source / "rtl").is_dir():
++        raise FileNotFoundError(f"Expected vendored compiler tree at {source}")
++    work = WORK / "x86_64-win64"
++    runtime = work / "runtime" / "x86_64-win64"
++    runtime_source = runtime / "src"
++    units = runtime_source / "rtl" / "units" / "x86_64-win64"
++    revision = source_revision()
++    options = ["-n", "-O2"]
++    target_flags = [
++        "CPU_TARGET=x86_64",
++        "OS_TARGET=win64",
++        f"BINUTILSPREFIX={prefix}",
++        f"CROSSBINDIR={cross_bin}",
++    ]
++    stamp = runtime / "runtime.stamp"
++    runtime_revision = revision + repr((options, target_flags))
++    if not (units / "system.ppu").is_file() or not matches(stamp, runtime_revision):
++        runtime.mkdir(parents=True, exist_ok=True)
++        stamp.unlink(missing_ok=True)
++        if runtime_source.exists():
++            shutil.rmtree(runtime_source)
++        shutil.copytree(
++            source / "rtl", runtime_source / "rtl", ignore=shutil.ignore_patterns("units")
++        )
++        for name in ("compiler", "packages"):
++            dest = runtime_source / name
++            if not dest.exists():
++                link = source / name if (source / name).exists() else VENDOR / name
++                dest.symlink_to(link, target_is_directory=True)
++        units.mkdir(parents=True, exist_ok=True)
++        run_step(runtime, "runtime", [
++            make, "-C", runtime_source / "rtl", "all", *target_flags,
++            f"FPC={host_compiler}", "OPT=" + " ".join(options),
++        ])
++        stamp.write_text(runtime_revision)
++    packages = VENDOR / "packages"
++    # Prefer packages from the bootstrapped source tree when present (same revision).
++    pkg_root = source / "packages" if (source / "packages").is_dir() else packages
++    # Package set aligned with pascal_flags + Windows API units.
++    # platform/TlHelp32.pas provides Delphi-named Tool Help API (not in winunits-base).
++    paths = [
++        units,
++        pkg_root / "rtl-objpas/src/inc",
++        pkg_root / "fcl-base/src",
++        pkg_root / "fcl-image/src",
++        pkg_root / "pasjpeg/src",
++        pkg_root / "fcl-process/src",
++        pkg_root / "fcl-registry/src",
++        pkg_root / "winunits-base/src",
++        pkg_root / "hash/src",
++        pkg_root / "oggvorbis/src",
++    ]
++    flags = [
++        "-n",
++        "-Twin64",
++        "-Px86_64",
++        f"-FD{cross_bin}",
++        f"-XP{prefix}",
++        *(f"-Fu{path}" for path in paths if path.is_dir()),
++        f"-Fi{pkg_root}/fcl-process/src/win",
++        f"-Fi{pkg_root}/winunits-base/src",
++        f"-Fi{pkg_root}/fcl-registry/src",
++        f"-Fi{pkg_root}/fcl-base/src",
++        f"-Fi{pkg_root}/fcl-image/src",
++        f"-Fi{pkg_root}/pasjpeg/src",
++        f"-Fi{pkg_root}/oggvorbis/src",
++    ]
++    return host_compiler, flags, units
+diff --git a/tools/targets.py b/tools/targets.py
+index 788aeec..f329397 100644
+--- a/tools/targets.py
++++ b/tools/targets.py
+@@ -28,6 +28,8 @@ def desktop_directory(
+     configuration += "-lto" if lto else ""
+     if target == "linux":
+         return root / ".local" / f"linux-{linux_cpu()}" / configuration
++    if target == "windows":
++        return root / ".local" / "windows-x86_64" / configuration
+     return root / ".local" / configuration
+ 
+ 
+@@ -37,4 +39,6 @@ def desktop_binary(
+     directory = desktop_directory(root, target, release, lto, llvm=llvm)
+     if target == "linux":
+         return directory / "bin/Rangers"
++    if target == "windows":
++        return directory / "bin/Rangers.exe"
+     return directory / "Space Rangers HD.app/Contents/MacOS/Rangers"

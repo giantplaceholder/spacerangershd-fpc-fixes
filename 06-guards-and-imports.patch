@@ -1,0 +1,132 @@
+diff --git a/source/arcade/ab_Space.pas b/source/arcade/ab_Space.pas
+index d6fde76..801bb52 100644
+--- a/source/arcade/ab_Space.pas
++++ b/source/arcade/ab_Space.pas
+@@ -156,8 +156,16 @@ uses
+ constructor TabSpace.Create;
+ begin
+   inherited Create;
+-  Color28 := CurrentPixelFormat.PackRgbBytes(255, 255, 0);
+-  Color2C := CurrentPixelFormat.PackRgbBytes(155, 155, 0);
++  if CurrentPixelFormat <> nil then
++  begin
++    Color28 := CurrentPixelFormat.PackRgbBytes(255, 255, 0);
++    Color2C := CurrentPixelFormat.PackRgbBytes(155, 155, 0);
++  end
++  else
++  begin
++    Color28 := $FFFF;
++    Color2C := $9CE0;
++  end;
+   Objects := TList.Create;
+   ImageActive := False;
+ end;
+@@ -843,12 +851,23 @@ end;
+ procedure ab_Space_Clear;
+ begin
+   ab_SpaceLink_Clear;
+-  while not (FirstArcadeSpace = nil) do
+-    ab_Space_Delete(LastArcadeSpace);
++  while FirstArcadeSpace <> nil do
++  begin
++    if LastArcadeSpace <> nil then
++      ab_Space_Delete(LastArcadeSpace)
++    else
++    begin
++      // Linked list corrupt: drop first without using Last
++      ab_Space_Delete(FirstArcadeSpace);
++    end;
++  end;
++  LastArcadeSpace := nil;
++  FirstArcadeSpace := nil;
+   CurrentArcadeSpace := nil;
+   NextArcadeSpace := nil;
+   StartArcadeSpace := nil;
+   EndArcadeSpace := nil;
++  HoveredArcadeSpace := nil;
+ end;
+ 
+ function ab_Space_Add: TabSpace;
+@@ -870,6 +889,8 @@ procedure ab_Space_Delete(Space: TabSpace);
+ var
+   Link, Removing: PabSpaceLink;
+ begin
++  if Space = nil then
++    Exit;
+   if Space.Prev <> nil then
+     Space.Prev.Next := Space.Next;
+   if Space.Next <> nil then
+diff --git a/source/game/aSaveLoad.pas b/source/game/aSaveLoad.pas
+index c3a48b5..ffbb82d 100644
+--- a/source/game/aSaveLoad.pas
++++ b/source/game/aSaveLoad.pas
+@@ -61,6 +61,7 @@ procedure FinalizeSaveWriter;
+ implementation
+ 
+ uses
++  GameEvents,
+   aMyFunction,
+   aGalaxyStruct,
+   aKling,
+diff --git a/source/graphics/GI_GAIFile.pas b/source/graphics/GI_GAIFile.pas
+index 5cce548..5ca6358 100644
+--- a/source/graphics/GI_GAIFile.pas
++++ b/source/graphics/GI_GAIFile.pas
+@@ -78,6 +78,7 @@ type
+ implementation
+ 
+ uses
++  GameEvents,
+   Classes,
+   EC_Mem,
+   EC_Str,
+diff --git a/source/screens/fLoad.pas b/source/screens/fLoad.pas
+index e93896a..502b561 100644
+--- a/source/screens/fLoad.pas
++++ b/source/screens/fLoad.pas
+@@ -76,6 +76,7 @@ procedure LoadPendingAssets(PendingLoads: TList);
+ implementation
+ 
+ uses
++  GameEvents,
+   EC_CacheGAI,
+   GameInput,
+   SysUtils,
+diff --git a/source/screens/fSaveManager.pas b/source/screens/fSaveManager.pas
+index 1aa8d84..164b5a9 100644
+--- a/source/screens/fSaveManager.pas
++++ b/source/screens/fSaveManager.pas
+@@ -92,6 +92,7 @@ type
+ implementation
+ 
+ uses
++  GameEvents,
+   GI_MessageBox,
+   GR_DX,
+   aGalaxyStruct,
+diff --git a/source/ui/GI_Label.pas b/source/ui/GI_Label.pas
+index 2124f8c..9cf167c 100644
+--- a/source/ui/GI_Label.pas
++++ b/source/ui/GI_Label.pas
+@@ -123,9 +123,18 @@ begin
+   GlobalCache.ResetControl(FontCache);
+   EmbeddedImage := nil;
+   TextLines := TStringsEC.Create;
+-  TextColor := CurrentPixelFormat.PackRgbBytes(255, 255, 255);
+-  BorderLightColor := CurrentPixelFormat.PackRgbBytes(255, 255, 255);
+-  BorderDarkColor := CurrentPixelFormat.PackRgbBytes(55, 55, 55);
++  if CurrentPixelFormat <> nil then
++  begin
++    TextColor := CurrentPixelFormat.PackRgbBytes(255, 255, 255);
++    BorderLightColor := CurrentPixelFormat.PackRgbBytes(255, 255, 255);
++    BorderDarkColor := CurrentPixelFormat.PackRgbBytes(55, 55, 55);
++  end
++  else
++  begin
++    TextColor := $FFFF;
++    BorderLightColor := $FFFF;
++    BorderDarkColor := $3186;
++  end;
+   TextBorderWidth := 0;
+   TextBorderColor := 0;
+   BorderEnabled := False;

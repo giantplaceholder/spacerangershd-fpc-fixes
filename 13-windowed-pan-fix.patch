@@ -1,0 +1,29 @@
+diff --git a/source/screens/fStarMap.pas b/source/screens/fStarMap.pas
+index 15293bc..4b6dbb0 100644
+--- a/source/screens/fStarMap.pas
++++ b/source/screens/fStarMap.pas
+@@ -2961,6 +2961,7 @@ end;
+ procedure TfStarMap.ScrollMap(Timer: PCallbackTimerGI; UserData: PtrInt);
+ var
+   Point, OldPoint: TPoint;
++  Desktop: TPoint;
+   X, Y: SmallInt;
+   Sense: Integer;
+ begin
+@@ -2981,6 +2982,16 @@ begin
+     Sense := 2;
+   if GameWindowFocused then
+   begin
++    // Windowed: stop edge pan about 10px outside the frame. SDL clamps the
++    // last cursor to the border, so test the desktop cursor.
++    if GameWindowed then
++    begin
++      GetGameMouse(Desktop);
++      if (Desktop.X < -10) or (Desktop.X > Integer(GameScreenWidth) + 10) then
++        X := Sense + 1;
++      if (Desktop.Y < -10) or (Desktop.Y > Integer(GameScreenHeight) + 10) then
++        Y := Sense + 1;
++    end;
+     // Pillarbox/letterbox maps to X/Y outside 0..size. Treat the bars as
+     // the corresponding edge so pan still runs off the picture.
+     if X < Sense then

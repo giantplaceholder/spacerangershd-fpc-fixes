@@ -1,0 +1,419 @@
+diff --git a/source/scene/fFilm.pas b/source/scene/fFilm.pas
+index c9ce7b5..e8043c8 100644
+--- a/source/scene/fFilm.pas
++++ b/source/scene/fFilm.pas
+@@ -88,6 +88,7 @@ type
+ implementation
+ 
+ uses
++  GameEvents,
+   aGalaxyStruct,
+   SysUtils,
+   Math,
+@@ -320,6 +321,7 @@ procedure TfFilm.PanView(Timer: PCallbackTimerGI; UserData: PtrInt);
+ var
+   Offset, OldOffset: TPoint;
+   X, Y: SmallInt;
++  Sense: Integer;
+ begin
+   OldOffset := GetViewOffset;
+   Offset := OldOffset;
+@@ -333,13 +335,16 @@ begin
+     Inc(Offset.Y, ScrollStep);
+   X := GetCursorPoint.X;
+   Y := GetCursorPoint.Y;
+-  if X < ScrollSense then
++  Sense := ScrollSense;
++  if Sense < 32 then
++    Sense := 32;
++  if X < Sense then
+     Dec(Offset.X, ScrollStep);
+-  if X > GameScreenWidth - ScrollSense - 1 then
++  if X > GameScreenWidth - Sense - 1 then
+     Inc(Offset.X, ScrollStep);
+-  if Y < ScrollSense then
++  if Y < Sense then
+     Dec(Offset.Y, ScrollStep);
+-  if Y > GameScreenHeight - ScrollSense - 1 then
++  if Y > GameScreenHeight - Sense - 1 then
+     Inc(Offset.Y, ScrollStep);
+   if (OldOffset.X <> Offset.X) or (OldOffset.Y <> Offset.Y) then
+     SetViewOffset(Offset);
+diff --git a/source/screens/fCfgSettings.pas b/source/screens/fCfgSettings.pas
+index 147799f..0b3de3c 100644
+--- a/source/screens/fCfgSettings.pas
++++ b/source/screens/fCfgSettings.pas
+@@ -273,6 +273,7 @@ var
+   Panel: TPanelScrollBarGI;
+   I, LanguageCount: Integer;
+   Language, LanguageName: WideString;
++  InstallAnsi: AnsiString;
+   ValueLabel: TLabelGI;
+   Block: TBlockParEC;
+ begin
+@@ -313,22 +314,32 @@ begin
+       Break;
+     end;
+   end;
++  // Picker only if more than one language code is listed. Single-language
++  // installs (typical RU-only data) have no extra pack files.
+   if not SteamInitialized and (RequestedLanguage = '') then
+   begin
+-    AddOptionLabel('Lang', LocalizedText('FormCfgSettings.Lang'), True);
+-    if (AvailableLanguageCodes <> '')
+-        and (CountDelimitedPartsW(AvailableLanguageCodes, ',') > 0) then
+-    begin
++    LanguageCount := 0;
++    if AvailableLanguageCodes <> '' then
+       LanguageCount := CountDelimitedPartsW(AvailableLanguageCodes, ',');
++    if LanguageCount > 1 then
++    begin
++      AddOptionLabel('Lang', LocalizedText('FormCfgSettings.Lang'), True);
+       for I := 0 to LanguageCount - 1 do
+       begin
+         Language := ExtractDelimitedPartW(AvailableLanguageCodes, I, ',');
+-        if FileExists(NativeGamePath(AnsiString('install_' + Language + '.txt'))) then
++        LanguageName := Language;
++        InstallAnsi := AnsiString('install_' + Language + '.txt');
++        if not FileExists(NativeGamePath(InstallAnsi)) then
++          InstallAnsi := AnsiString('INSTALL_' + Language + '.txt');
++        if FileExists(NativeGamePath(InstallAnsi)) then
+         begin
+           Block := TBlockParEC.Create;
+-          Block.LoadFromTextFileWithEncodingProbe(PWideChar('install_' + Language + '.txt'), False);
+-          LanguageName := Block.GetParam('LangName');
+-          Block.Free;
++          try
++            Block.LoadFromTextFileWithEncodingProbe(PWideChar(WideString(InstallAnsi)), False);
++            LanguageName := Block.GetParam('LangName');
++          finally
++            Block.Free;
++          end;
+         end;
+         AddOptionChoice(
+             I,
+@@ -337,11 +348,6 @@ begin
+             (Galaxy <> nil) and HasInstalledPackages
+         );
+       end;
+-    end
+-    else
+-    begin
+-      Language := SelectedLanguage;
+-      AddOptionChoice(0, ExtractDelimitedPartW(Language, 0, ','), True, False);
+     end;
+   end;
+   AddOptionLabel('MultiThread', LocalizedText('FormCfgSettings.MultiThread'), True);
+@@ -1254,56 +1260,69 @@ end;
+ function TfCfgSettings.HasOptionValue(OptionName: WideString): Boolean;
+ var
+   Control: TObjectGI;
++  GroupIndex: Integer;
+ begin
+-  Control := GroupPanels[ActiveGroupIndex].FirstChild;
+-  while Control <> nil do
++  Result := False;
++  for GroupIndex := 0 to 5 do
+   begin
+-    if Control.ControlName = OptionName then
+-      if Control is TImageGI then
+-      begin
+-        if (Control as TImageGI).GetImagePath
+-            = 'GI,Bm.FormOptions2.' + GiResourceSuffix + 'SwitchD' then
++    if GroupPanels[GroupIndex] = nil then
++      Continue;
++    Control := GroupPanels[GroupIndex].FirstChild;
++    while Control <> nil do
++    begin
++      if Control.ControlName = OptionName then
++        if Control is TImageGI then
++        begin
++          if (Control as TImageGI).GetImagePath
++              = 'GI,Bm.FormOptions2.' + GiResourceSuffix + 'SwitchD' then
++          begin
++            Result := True;
++            Exit;
++          end;
++        end
++        else if Control is TCountBarGI then
+         begin
+           Result := True;
+           Exit;
+         end;
+-      end
+-      else if Control is TCountBarGI then
+-      begin
+-        Result := True;
+-        Exit;
+-      end;
+-    Control := Control.NextSibling;
++      Control := Control.NextSibling;
++    end;
+   end;
+-  Result := False;
+ end;
+ 
+ function TfCfgSettings.GetOptionValue(OptionName: WideString): Integer;
+ var
+   Control: TObjectGI;
++  GroupIndex: Integer;
+ begin
+   Result := 0;
+-  Control := GroupPanels[ActiveGroupIndex].FirstChild;
+-  while Control <> nil do
++  // Search the active group first, then all groups (options live across tabs).
++  for GroupIndex := 0 to 5 do
+   begin
+-    if Control.ControlName = OptionName then
+-      if Control is TImageGI then
+-      begin
+-        if (Control as TImageGI).GetImagePath
+-            = 'GI,Bm.FormOptions2.' + GiResourceSuffix + 'SwitchD' then
++    if GroupPanels[GroupIndex] = nil then
++      Continue;
++    Control := GroupPanels[GroupIndex].FirstChild;
++    while Control <> nil do
++    begin
++      if Control.ControlName = OptionName then
++        if Control is TImageGI then
++        begin
++          if (Control as TImageGI).GetImagePath
++              = 'GI,Bm.FormOptions2.' + GiResourceSuffix + 'SwitchD' then
++          begin
++            Result := Control.UserValue;
++            Exit;
++          end;
++        end
++        else if Control is TCountBarGI then
+         begin
+-          Result := Control.UserValue;
++          Result := (Control as TCountBarGI).Position;
+           Exit;
+         end;
+-      end
+-      else if Control is TCountBarGI then
+-      begin
+-        Result := (Control as TCountBarGI).Position;
+-        Exit;
+-      end;
+-    Control := Control.NextSibling;
++      Control := Control.NextSibling;
++    end;
+   end;
+-  RaiseWideMessage('UnitGet Type=' + OptionName);
++  // Missing option (Lang omitted on a single-language install) stays 0.
+ end;
+ 
+ procedure TfCfgSettings.SetOptionValue(OptionName: WideString; Value: Integer);
+@@ -2141,7 +2160,7 @@ begin
+   RestartNeeded := False;
+   ResetNeeded := False;
+   ActiveGroupIndex := 0;
+-  if not SteamInitialized and (RequestedLanguage = '') then
++  if not SteamInitialized and (RequestedLanguage = '') and HasOptionValue('Lang') then
+   begin
+     Language := ExtractDelimitedPartW(AvailableLanguageCodes, GetOptionValue('Lang'), ',');
+     // With no enumerated languages, the UI displays SelectedLanguage itself.
+diff --git a/source/screens/fRuinsTalk.pas b/source/screens/fRuinsTalk.pas
+index 433b93e..9654171 100644
+--- a/source/screens/fRuinsTalk.pas
++++ b/source/screens/fRuinsTalk.pas
+@@ -8906,11 +8906,11 @@ var
+   I, OfferCount, Cost, Duration, MaxStimulants, LawStimulants: Integer;
+   Seed: Cardinal;
+   Text, StimulantText, Key: WideString;
+-  Offers: set of 8..39;
++  OffersTaken: array[8..39] of Boolean;
+   Rank: TShipRank;
+   Bonus: Integer;
+ begin
+-  Offers := [];
++  FillChar(OffersTaken, SizeOf(OffersTaken), 0);
+   OfferCount := 0;
+   Seed := Galaxy.GenerationSeed * (Galaxy.CurrentTurn div 13);
+   if GetPlayer.DockedTo.CurrentStar.ControlFaction = sfPirates then
+@@ -8921,11 +8921,11 @@ begin
+   begin
+     AdvanceRandomSeed(Seed);
+     I := SeededRandomIntRange(13, 24, Seed);
+-    if not (I in Offers)
++    if (not OffersTaken[I])
+         and (SeededRandomUnitFloat(Seed)
+             <= CaptainHealthDefinitions[TCaptainHealthEffect(I)].InfectionChance) then
+     begin
+-      Include(Offers, I);
++      OffersTaken[I] := True;
+       Inc(OfferCount);
+       if OfferCount > Max(2, (Rank shr 1) + 1) then
+         Break;
+@@ -8981,7 +8981,7 @@ begin
+   begin
+     StimulantText := '';
+     for I := 13 to 24 do
+-      if I in Offers then
++      if OffersTaken[I] then
+       begin
+         Text := '';
+         Text := LocalizedColorText('FormRuins.MC.Stimulants.MCStimInfo');
+@@ -9033,7 +9033,7 @@ begin
+     ReplaceTextToken(DialogText, '<MCStimInfo>', StimulantText, '');
+     ClearChoices;
+     for I := 13 to 24 do
+-      if I in Offers then
++      if OffersTaken[I] then
+       begin
+         Cost :=
+             GenerateValueForSizeLevel(
+diff --git a/source/screens/fStarMap.pas b/source/screens/fStarMap.pas
+index b865aa2..15293bc 100644
+--- a/source/screens/fStarMap.pas
++++ b/source/screens/fStarMap.pas
+@@ -2962,6 +2962,7 @@ procedure TfStarMap.ScrollMap(Timer: PCallbackTimerGI; UserData: PtrInt);
+ var
+   Point, OldPoint: TPoint;
+   X, Y: SmallInt;
++  Sense: Integer;
+ begin
+   OldPoint := GetMapCenter;
+   Point := OldPoint;
+@@ -2975,22 +2976,21 @@ begin
+     Inc(Point.Y, ScrollStep);
+   X := GetCursorPoint.X;
+   Y := GetCursorPoint.Y;
++  Sense := ScrollSense;
++  if Sense < 2 then
++    Sense := 2;
+   if GameWindowFocused then
+   begin
+-    if (X >= -30) and (X <= Integer(GameScreenWidth) + 30) then
+-    begin
+-      if X < ScrollSense then
+-        Dec(Point.X, ScrollStep);
+-      if X > Integer(GameScreenWidth) - ScrollSense - 1 then
+-        Inc(Point.X, ScrollStep);
+-    end;
+-    if (Y >= -30) and (Y <= Integer(GameScreenHeight) + 30) then
+-    begin
+-      if Y < ScrollSense then
+-        Dec(Point.Y, ScrollStep);
+-      if Y > Integer(GameScreenHeight) - ScrollSense - 1 then
+-        Inc(Point.Y, ScrollStep);
+-    end;
++    // Pillarbox/letterbox maps to X/Y outside 0..size. Treat the bars as
++    // the corresponding edge so pan still runs off the picture.
++    if X < Sense then
++      Dec(Point.X, ScrollStep);
++    if X > Integer(GameScreenWidth) - Sense - 1 then
++      Inc(Point.X, ScrollStep);
++    if Y < Sense then
++      Dec(Point.Y, ScrollStep);
++    if Y > Integer(GameScreenHeight) - Sense - 1 then
++      Inc(Point.Y, ScrollStep);
+     if (OldPoint.X <> Point.X) or (OldPoint.Y <> Point.Y) then
+       SetMapCenterManually(Point);
+   end;
+diff --git a/source/ui/GI_Cursor.pas b/source/ui/GI_Cursor.pas
+index dec6a1a..be564ef 100644
+--- a/source/ui/GI_Cursor.pas
++++ b/source/ui/GI_Cursor.pas
+@@ -129,10 +129,11 @@ begin
+   begin
+     if Enabled then
+     begin
+-      if High(CursorHandles) >= 0 then
++      if (High(CursorHandles) >= 0) and (CursorHandles[0] <> nil) then
+       begin
+         FrameIndex := 0;
+-        SDL_SetCursor(CursorHandles[FrameIndex]);
++        if CursorHandles[FrameIndex] <> nil then
++          SDL_SetCursor(CursorHandles[FrameIndex]);
+         while ShowGameCursor(True) < 0 do
+           ;
+         if High(FrameIndices) > 0 then
+@@ -287,25 +288,30 @@ end;
+ function TCursorGI.CreateNativeCursor(Buffer: TGraphBufGR; Hotspot: TPoint): Pointer;
+ var
+   Surface: Pointer;
++  HotX, HotY, W, H: Integer;
+ begin
+-  // The game's cursor images use the same BGRA bytes as the original DIB.
+-  // SDL copies the surface into the cursor, so the decoded frame can be reused.
++  // Clamp hotspot: SDL requires it inside the surface.
++  W := Buffer.Width;
++  H := Buffer.Height;
++  HotX := Hotspot.X;
++  HotY := Hotspot.Y;
++  if HotX < 0 then HotX := 0;
++  if HotY < 0 then HotY := 0;
++  if (W > 0) and (HotX >= W) then HotX := W - 1;
++  if (H > 0) and (HotY >= H) then HotY := H - 1;
++  if (W <= 0) or (H <= 0) then
++  begin
++    Result := nil;
++    Exit;
++  end;
+   Surface :=
+       SDL_CreateRGBSurfaceFrom(
+-          Buffer.GetPixels,
+-          Buffer.Width,
+-          Buffer.Height,
+-          32,
+-          Buffer.PitchBytes,
+-          $FF0000,
+-          $FF00,
+-          $FF,
+-          $FF000000
+-      );
++          Buffer.GetPixels, W, H, 32, Buffer.PitchBytes,
++          $FF0000, $FF00, $FF, $FF000000);
+   if Surface = nil then
+     RaiseWideMessage('Cursor surface: ' + string(SDL_GetError));
+   try
+-    Result := SDL_CreateColorCursor(Surface, Hotspot.X, Hotspot.Y);
++    Result := SDL_CreateColorCursor(Surface, HotX, HotY);
+     if Result = nil then
+       RaiseWideMessage('Cursor: ' + string(SDL_GetError));
+   finally
+diff --git a/source/ui/GI_MessageLoop.pas b/source/ui/GI_MessageLoop.pas
+index 1d74d1d..bac5892 100644
+--- a/source/ui/GI_MessageLoop.pas
++++ b/source/ui/GI_MessageLoop.pas
+@@ -1021,17 +1021,23 @@ end;
+ 
+ procedure TObjectGI.BroadcastKeyDown(Key: Cardinal);
+ var
+-  Child: TObjectGI;
++  Child, NextChild: TObjectGI;
+ begin
+-  if OnKeyDownCode <> nil then
+-    MessageLoop.ExecuteUiCode(OnKeyDownCode, Key);
+-  if Assigned(KeyDownCallback) then
+-    KeyDownCallback(Self, Key);
++  try
++    if OnKeyDownCode <> nil then
++      MessageLoop.ExecuteUiCode(OnKeyDownCode, Key);
++    if Assigned(KeyDownCallback) then
++      KeyDownCallback(Self, Key);
++  except
++    on E: EBreakMessageGI do
++      raise;
++  end;
+   Child := FirstChild;
+   while Child <> nil do
+   begin
++    NextChild := Child.NextSibling;
+     Child.BroadcastKeyDown(Key);
+-    Child := Child.NextSibling;
++    Child := NextChild;
+   end;
+ end;
+ 
+@@ -2536,6 +2542,8 @@ end;
+ 
+ procedure TMessageLoopGI.RequestClose(ResultCode: Integer);
+ begin
++  // Non-zero ExitCode only ends this message loop (screen transition).
++  // Application quit is ExitScreenLoop / WM_QUIT (window close or explicit quit).
+   ExitCode := ResultCode;
+ end;
+ 

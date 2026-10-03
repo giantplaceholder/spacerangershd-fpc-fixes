@@ -1,0 +1,334 @@
+diff --git a/source/GR_Main.pas b/source/GR_Main.pas
+index 6bbf02f..82aced5 100644
+--- a/source/GR_Main.pas
++++ b/source/GR_Main.pas
+@@ -1094,6 +1094,7 @@ var
+   RequestedRefreshRate: Integer = 0;
+ 
+   PresentWithoutLimit: Boolean = False;
++  LastPresentationQpc: QWord = 0;
+ 
+   DisableHardwareVertexProcessing: Boolean = False;
+ 
+@@ -2392,7 +2393,7 @@ var
+     if Length(Prefix) > Length(Path) then
+       Exit;
+     CharacterIndex := 1;
+-    CharacterCount := Min(Length(Prefix), Length(Path));
++    CharacterCount := Math.Min(Length(Prefix), Length(Path));
+     while CharacterIndex < CharacterCount do
+     begin
+       if Prefix[CharacterIndex] <> Path[CharacterIndex] then
+@@ -2562,7 +2563,7 @@ end;
+ constructor TCCInterface.Create;
+ begin
+   inherited Create;
+-  Lock := TCriticalSection.Create;
++  Lock := SyncObjs.TCriticalSection.Create;
+   Randomize;
+   Buffer := TBufEC.Create;
+   CommitSnapshot(CreateEmptySnapshot);
+@@ -4570,8 +4571,8 @@ begin
+     end
+     else
+     begin
+-      Bounds.Left := (DesktopDisplayMode.Width - Cardinal(Width)) div 2;
+-      Bounds.Top := (DesktopDisplayMode.Height - Cardinal(Height)) div 2;
++      Bounds.Left := SDL_WINDOWPOS_CENTERED;
++      Bounds.Top := SDL_WINDOWPOS_CENTERED;
+     end;
+     Bounds.Right := Bounds.Left + Width;
+     Bounds.Bottom := Bounds.Top + Height;
+@@ -4854,11 +4855,11 @@ begin
+     ModuleName := ' (1 core)'
+   else
+     ModuleName := WideString(' (' + IntToStr(Count) + ' cores)');
+-  ProcessorCoreCount := Max(Count, 1);
++  ProcessorCoreCount := Math.Max(Count, 1);
+   AppendLogLineThreadSafe(AnsiString('Processor=' + ExtraText + ModuleName));
+   AppendLogLineThreadSafe(
+       'CPU Clock='
+-          + IntToStr(Round(Min(Min(MeasureCpuClockMHz, MeasureCpuClockMHz), MeasureCpuClockMHz)))
++          + IntToStr(Round(Math.Min(Math.Min(MeasureCpuClockMHz, MeasureCpuClockMHz), MeasureCpuClockMHz)))
+           + ' MHz'
+   );
+   MemoryStatus.Length := SizeOf(MemoryStatus);
+@@ -4989,7 +4990,7 @@ begin
+       GlobalCache.ResidentByteLimit := $18000000
+     else
+       GlobalCache.ResidentByteLimit :=
+-          Min(Int64(Cardinal(MemoryStatus.AvailVirtual) div 3), Int64($18000000));
++          Math.Min(Int64(Cardinal(MemoryStatus.AvailVirtual) div 3), Int64($18000000));
+   AppendLogLineThreadSafe('Cache Size=' + IntToStr(GlobalCache.ResidentByteLimit div 1024) + ' KB');
+   if UserSettingsConfig.CountParams('Brightness') > 0 then
+     DisplayBrightness :=
+@@ -5452,7 +5453,11 @@ begin
+   with Direct3DPresentParameters do
+   begin
+     System.FillChar(Pointer(@Direct3DPresentParameters)^, SizeOf(Direct3DPresentParameters), 0);
+-    Windowed := WindowedModeRequested and (Cardinal(GameScreenHeight) < DesktopDisplayMode.Height);
++    // Honor the setting. The old "must be shorter than the desktop" test
++    // used GetCurrentDisplayMode, which after a mode change can equal the
++    // game size and force FULLSCREEN_DESKTOP: 1280x720 then upscales to
++    // the whole display.
++    Windowed := WindowedModeRequested;
+     DeviceWindow := MainWindowHandle;
+     if DisableTripleBuffer then
+       BackBufferCount := 1
+@@ -5465,6 +5470,16 @@ begin
+       if VSyncEnabled then
+         PresentationInterval := D3DPRESENT_INTERVAL_DEFAULT;
+       SwapEffect := D3DSWAPEFFECT_DISCARD;
++      if AlternateViewportEnabled then
++      begin
++        BackBufferWidth := PresentationWidth;
++        BackBufferHeight := PresentationHeight;
++      end
++      else
++      begin
++        BackBufferWidth := GameScreenWidth;
++        BackBufferHeight := GameScreenHeight;
++      end;
+     end
+     else
+     begin
+@@ -5895,7 +5910,7 @@ begin
+   HighInput := HighInput - (1 - Level) * (0.4 * Contrast);
+   LowIndex := Round(LowInput * 255);
+   HighIndex := Round(HighInput * 255);
+-  Value := Round(Max(0, LowOutput) * 65535);
++  Value := Round(Math.Max(0, LowOutput) * 65535);
+   for Index := 0 to LowIndex - 1 do
+   begin
+     Ramp.Red[Index] := Value;
+@@ -5908,7 +5923,7 @@ begin
+   begin
+     if (Index >= 0) and (Index <= 255) then
+     begin
+-      Value := Round(Max(0, Level) * 65535);
++      Value := Round(Math.Max(0, Level) * 65535);
+       if Value < 0 then
+         Value := 0
+       else if Value > 65535 then
+@@ -5919,7 +5934,7 @@ begin
+     end;
+     Level := Level + Step;
+   end;
+-  Value := Round(Min(1.0, HighOutput) * 65535);
++  Value := Round(Math.Min(1.0, HighOutput) * 65535);
+   for Index := HighIndex to 255 do
+   begin
+     Ramp.Red[Index] := Value;
+@@ -5986,17 +6001,30 @@ begin
+           Callback(Msg.message, Msg.wParam, Msg.lParam);
+       end;
+       Stage := 11;
++      if ExitScreenLoop then
++      begin
++        Result := 0;
++        Exit;
++      end;
+       if (ContinueLoop = 0) or RuntimeActive then
+         Break;
+       SysUtils.Sleep(1);
+     end;
+-    Result := ContinueLoop;
++    if ExitScreenLoop then
++      Result := 0
++    else
++      Result := ContinueLoop;
+   except
+     on E: Exception do
+     begin
+       AppendLogLineThreadSafe(E.ClassName + ' ' + E.Message);
+       raise Exception.Create(
+-          'Error in procedure GR_WinMessage, label = ' + SysUtils.IntToStr(Stage));
++          'Error in procedure GR_WinMessage, label = '
++              + SysUtils.IntToStr(Stage)
++              + ': '
++              + E.ClassName
++              + ' '
++              + E.Message);
+     end;
+   end;
+ end;
+@@ -6114,7 +6142,10 @@ begin
+     end;
+   end
+   else if Message = WM_CLOSE then
+-    ExitScreenLoop := True
++  begin
++    ExitScreenLoop := True;
++    PostGameMessage(WM_QUIT, 0, 0);
++  end
+   else if Message = WM_CANCELMODE then
+     RuntimeActive := False
+   else if Message = WM_SETCURSOR then
+@@ -6140,6 +6171,7 @@ end;
+ procedure EndFramePresentation;
+ var
+   Tick: Cardinal;
++  LimitMs, ElapsedMs, Freq: QWord;
+ begin
+   if PresentationDepth > 0 then
+   begin
+@@ -6151,9 +6183,17 @@ begin
+       else
+       begin
+         Tick := GameTickCount;
+-        if 1000 div PresentationFrameRate < Tick - LastPresentationTick then
++        LimitMs := 16;
++        if PresentationFrameRate <> 0 then
++          LimitMs := 1000 div PresentationFrameRate;
++        ElapsedMs := LimitMs + 1;
++        Freq := SDL_GetPerformanceFrequency;
++        if (LastPresentationQpc <> 0) and (Freq <> 0) then
++          ElapsedMs := (SDL_GetPerformanceCounter - LastPresentationQpc) * 1000 div Freq;
++        if ElapsedMs > LimitMs then
+         begin
+           LastPresentationTick := Tick;
++          LastPresentationQpc := SDL_GetPerformanceCounter;
+           PresentScreenBuffer;
+         end;
+       end;
+@@ -6387,7 +6427,7 @@ begin
+       repeat
+         if (FindData.Attr and faDirectory) <> faDirectory then
+           FirstFrameNumber :=
+-              Max(FirstFrameNumber, ExtractDigitsToIntW(WideString(AnsiString(FindData.Name))));
++              Math.Max(FirstFrameNumber, ExtractDigitsToIntW(WideString(AnsiString(FindData.Name))));
+       until SysUtils.FindNext(FindData) <> 0;
+       SysUtils.FindClose(FindData);
+     end;
+@@ -6998,7 +7038,7 @@ end;
+ procedure AppendLogLineThreadSafe(const Text: AnsiString);
+ begin
+   if SessionLogLock = nil then
+-    SessionLogLock := TCriticalSection.Create;
++    SessionLogLock := SyncObjs.TCriticalSection.Create;
+   SessionLogLock.Enter;
+   Append(SessionLog);
+   Writeln(SessionLog, Text);
+@@ -7009,7 +7049,7 @@ end;
+ procedure AppendLogTextThreadSafe(const Text: AnsiString);
+ begin
+   if SessionLogLock = nil then
+-    SessionLogLock := TCriticalSection.Create;
++    SessionLogLock := SyncObjs.TCriticalSection.Create;
+   SessionLogLock.Enter;
+   Append(SessionLog);
+   Write(SessionLog, Text);
+@@ -7022,7 +7062,7 @@ var
+   Log: TextFile;
+ begin
+   if SessionLogLock = nil then
+-    SessionLogLock := TCriticalSection.Create;
++    SessionLogLock := SyncObjs.TCriticalSection.Create;
+   SessionLogLock.Enter;
+   AssignFile(Log, '#####add.log');
+   if not FileExists('#####add.log') then
+@@ -7041,7 +7081,7 @@ begin
+   if FileExists('#####add.log') then
+   begin
+     if SessionLogLock = nil then
+-      SessionLogLock := TCriticalSection.Create;
++      SessionLogLock := SyncObjs.TCriticalSection.Create;
+     SessionLogLock.Enter;
+     AssignFile(Log, '#####add.log');
+     Append(Log);
+@@ -7056,7 +7096,7 @@ var
+   F: TextFile;
+ begin
+   if SessionLogLock = nil then
+-    SessionLogLock := TCriticalSection.Create;
++    SessionLogLock := SyncObjs.TCriticalSection.Create;
+   SessionLogLock.Enter;
+   AssignFile(F, NativeGamePath(FileName));
+   Rewrite(F);
+diff --git a/source/Rangers.dpr b/source/Rangers.dpr
+index 1948f70..f96801d 100644
+--- a/source/Rangers.dpr
++++ b/source/Rangers.dpr
+@@ -407,7 +407,7 @@ begin
+   if ExitScreenLoop then
+     ;
+   if (NewGameGenerationThread <> nil) and NewGameGenerationThread.IsRunning then
+-    NewGameGenerationThread.WaitForIdle(INFINITE);
++    NewGameGenerationThread.WaitForIdle(5000);
+   if GetPlayer = nil then
+     Exit;
+   if Galaxy = nil then
+@@ -454,7 +454,7 @@ begin
+   end;
+   ResetGameEvent(ScriptUiAbortEvent);
+   if (GameLoadScreen.LoadThread <> nil) and GameLoadScreen.LoadThread.IsRunning then
+-    GameLoadScreen.LoadThread.WaitForIdle(INFINITE);
++    GameLoadScreen.LoadThread.WaitForIdle(5000);
+   if not MemorySnapshotActive then
+     SaveGameToMemorySnapshot;
+ end;
+@@ -704,6 +704,15 @@ begin
+               Format(
+                   '=== Start %d-%.2d-%.2d %.2d.%.2d.%.2d.%.3d',
+                   [
++{$IFDEF FPC}
++                      StartupTime.Year,
++                      StartupTime.Month,
++                      StartupTime.Day,
++                      StartupTime.Hour,
++                      StartupTime.Minute,
++                      StartupTime.Second,
++                      StartupTime.Millisecond
++{$ELSE}
+                       StartupTime.wYear,
+                       StartupTime.wMonth,
+                       StartupTime.wDay,
+@@ -711,6 +720,7 @@ begin
+                       StartupTime.wMinute,
+                       StartupTime.wSecond,
+                       StartupTime.wMilliseconds
++{$ENDIF}
+                   ]
+               )
+           );
+@@ -754,7 +764,7 @@ begin
+             if TurnCalculationThread <> nil then
+             begin
+               TurnCalculationThread.RequestStop;
+-              TurnCalculationThread.WaitForIdle(INFINITE);
++              TurnCalculationThread.WaitForIdle(5000);
+             end;
+             HadProtectedStatus := False;
+             if Galaxy <> nil then
+@@ -811,7 +821,7 @@ begin
+           if TurnCalculationThread <> nil then
+           begin
+             TurnCalculationThread.RequestStop;
+-            WaitGameEvent(TurnCalculationThread.IdleEvent, INFINITE);
++            WaitGameEvent(TurnCalculationThread.IdleEvent, 5000);
+           end;
+           if not SuppressModRetryPrompt and (SelectedMods <> '') and not SkipModsOnReload then
+             if GameMessageBox(
+@@ -866,4 +876,22 @@ begin
+       end;
+     until not SkipModsOnReload;
+   end;
++  // Ensure process actually terminates (no stuck worker threads holding the shell)
++  // Useful when launching from terminal emulator; on KDE works intermittently though
++  try
++    ExitScreenLoop := True;
++    if TurnCalculationThread <> nil then
++    begin
++      TurnCalculationThread.RequestStop;
++      TurnCalculationThread.WaitForIdle(2000);
++    end;
++    if SteamCallbackThread <> nil then
++    begin
++      SteamCallbackThread.RequestStop;
++      SteamCallbackThread.WaitForIdle(1000);
++      FreeAndNil(SteamCallbackThread);
++    end;
++    CloseGameWindow;
++  except
++  end;
+ end.

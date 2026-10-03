@@ -1,0 +1,296 @@
+diff --git a/source/arcade/ab_Global.pas b/source/arcade/ab_Global.pas
+index e37d733..a5591d4 100644
+--- a/source/arcade/ab_Global.pas
++++ b/source/arcade/ab_Global.pas
+@@ -862,27 +862,26 @@ begin
+   // Preserve the x87 addition order and its single division followed by multiplies.
+   InverseW :=
+       1
+-          / (Extended(Matrix[0, 3]) * Source.X
+-              + Extended(Matrix[1, 3]) * Source.Y
+-              + Extended(Matrix[2, 3]) * Source.Z
++          / (Matrix[0, 3] * Source.X
++              + Matrix[1, 3] * Source.Y
++              + Matrix[2, 3] * Source.Z
+               + Matrix[3, 3]);
+   Result.X :=
+-      (Extended(Matrix[0, 0]) * Source.X
+-              + Extended(Matrix[1, 0]) * Source.Y
+-              + Extended(Matrix[2, 0]) * Source.Z
++      (Matrix[0, 0] * Source.X
++              + Matrix[1, 0] * Source.Y
++              + Matrix[2, 0] * Source.Z
+               + Matrix[3, 0])
+           * InverseW;
+   Result.Y :=
+-      (Extended(Matrix[0, 1]) * Source.X
+-              + Extended(Matrix[1, 1]) * Source.Y
+-              + Extended(Matrix[2, 1]) * Source.Z
++      (Matrix[0, 1] * Source.X
++              + Matrix[1, 1] * Source.Y
++              + Matrix[2, 1] * Source.Z
+               + Matrix[3, 1])
+           * InverseW;
+-  // Z unwinds the remaining x87 stack in a different order from X and Y.
+   Result.Z :=
+-      (Extended(Matrix[1, 2]) * Source.Y
+-              + (Extended(Matrix[0, 2]) * Source.X
+-                  + (Extended(Matrix[2, 2]) * Source.Z + Matrix[3, 2])))
++      (Matrix[1, 2] * Source.Y
++              + (Matrix[0, 2] * Source.X
++                  + (Matrix[2, 2] * Source.Z + Matrix[3, 2])))
+           * InverseW;
+ end;
+ 
+diff --git a/source/arcade/ab_MainForm.pas b/source/arcade/ab_MainForm.pas
+index 83290f1..0df47af 100644
+--- a/source/arcade/ab_MainForm.pas
++++ b/source/arcade/ab_MainForm.pas
+@@ -928,7 +928,10 @@ begin
+   if ((VirtualKey = VK_ESCAPE) or (VirtualKey = VK_SPACE))
+       and (VictoryPanel.Active or DefeatPanel.Active) then
+   begin
+-    if (GetPlayer <> nil) and (GetPlayer.GetHull.HullPoints > 0) and VictoryPanel.Active then
++    if (GetPlayer <> nil)
++        and (GetPlayer.GetHull <> nil)
++        and (GetPlayer.GetHull.HullPoints > 0)
++        and VictoryPanel.Active then
+     begin
+       if ShowMessageBoxGI(
+               Self,
+@@ -953,6 +956,10 @@ begin
+       CloseVictory(nil, 0);
+     Exit;
+   end;
++  // Ignore other keys while victory/defeat overlay is up; for some reason other key presses might cause a crash
++  // Overlay is modal; other keys can tear down battle state.
++  if VictoryPanel.Active or DefeatPanel.Active then
++    Exit;
+   if (VirtualKey = VK_TAB) and VictoryPanel.Active then
+     with GetByName('PanelWinHide') do
+       SetActive(not Active);
+@@ -1002,7 +1009,7 @@ begin
+   end
+   else if (VirtualKey = Ord('C')) and (ArcadeViewMode = 2) and (NextArcadeSpace = nil) then
+     ArcadeMapViewPosition := TruncatePointF(PlayerMapPosition)
+-  else if (VirtualKey = Ord('Q')) and (GetPlayer = nil) then
++  else if (VirtualKey = Ord('Q')) and (GetPlayer = nil) and (PlayerArcadeShip <> nil) then
+   begin
+     ab_Weapon_Initialize(@PlayerArcadeShip.Weapons[0], 50);
+     PlayerArcadeShip.Weapons[0].SlotData := 0;
+@@ -2452,11 +2459,17 @@ begin
+     ArcadeMapBounds.Right := Max(ArcadeMapBounds.Right, Space.MapPosition.X);
+     ArcadeMapBounds.Top := Min(ArcadeMapBounds.Top, Space.MapPosition.Y);
+     ArcadeMapBounds.Bottom := Max(ArcadeMapBounds.Bottom, Space.MapPosition.Y);
++    // PortalSlotCount was never assigned in the original decompile; use OutgoingCount.
++    // Upstream keeps RandomRange(0, PortalSlotCount-1) even when count is 0 (Exits[-1..2]).
++    // When unset, derive a sane count from outgoing links for non-zero shuffle range.
++    if Space.PortalSlotCount <= 0 then
++      Space.PortalSlotCount := Max(1, Min(3, Space.OutgoingCount));
++    if Space.PortalSlotCount > 3 then
++      Space.PortalSlotCount := 3;
+     Exits[0] := 0;
+     Exits[1] := 0;
+     Exits[2] := 0;
+-    // Native shuffles using the separate +$44 field (0x542BFC), even when zero.
+-    // RandomRange(0, -1) selects -1 or 0; both are valid slots in this array.
++    // Native shuffles using the separate +$44 field (0x542BFC).
+     if (Space.PortalSlotCount < 0) or (Space.PortalSlotCount > 3) then
+       RaiseWideMessage('Error in ABSpaceBuild: portal slot count');
+     if Space.PortalSlotCount > 1 then
+@@ -2678,10 +2691,10 @@ begin
+       begin
+         ColorValue :=
+             PInteger(
+-                Index * SizeOf(TArcadeMapColorVariant)
++                PAnsiChar(ColorData)
++                    + Index * SizeOf(TArcadeMapColorVariant)
+                     + SizeOf(TArcadeMapColorHeader)
+                     + SizeOf(Integer)
+-                    + PAnsiChar(ColorData)
+             )^;
+         if ColorValue = 0 then
+         begin
+@@ -2700,10 +2713,10 @@ begin
+         begin
+           ColorValue :=
+               PInteger(
+-                  Index * SizeOf(TArcadeMapColorVariant)
++                  PAnsiChar(ColorData)
++                      + Index * SizeOf(TArcadeMapColorVariant)
+                       + SizeOf(TArcadeMapColorHeader)
+                       + SizeOf(Integer)
+-                      + PAnsiChar(ColorData)
+               )^;
+           if ColorValue = 0 then
+           begin
+@@ -2731,10 +2744,10 @@ begin
+         begin
+           ColorValue :=
+               PInteger(
+-                  Index * SizeOf(TArcadeMapColorVariant)
++                  PAnsiChar(ColorData)
++                      + Index * SizeOf(TArcadeMapColorVariant)
+                       + SizeOf(TArcadeMapColorHeader)
+                       + SizeOf(Integer)
+-                      + PAnsiChar(ColorData)
+               )^;
+           if ColorValue < 20 then
+             Dec(ColorValue, 10);
+@@ -2749,7 +2762,7 @@ begin
+     end;
+     PInteger(@ColorData.SelectedVariant)^ := Selection;
+     Dec(Remaining, PInteger(@ColorData.ByteSize)^);
+-    ColorData := Pointer(PInteger(@ColorData.ByteSize)^+PAnsiChar(ColorData));
++    ColorData := Pointer(PAnsiChar(ColorData) + PInteger(@ColorData.ByteSize)^);
+   end;
+   ArcadeKellerEncounter :=
+       (GetPlayer <> nil)
+@@ -2959,12 +2972,12 @@ begin
+     begin
+       Frames :=
+           Pointer(
+-              PArcadeMapColorVariant(
+-                          Selection * SizeOf(TArcadeMapColorVariant)
+-                              + SizeOf(TArcadeMapColorHeader)
+-                              + PAnsiChar(ColorData))
+-                      .SequenceOffset
+-                  + PAnsiChar(ColorData)
++              PAnsiChar(ColorData)
++                  + PArcadeMapColorVariant(
++                      PAnsiChar(ColorData)
++                          + Selection * SizeOf(TArcadeMapColorVariant)
++                          + SizeOf(TArcadeMapColorHeader)
++                  ).SequenceOffset
+           );
+       FrameIndex := Frames.FrameIndex;
+       FrameCount := PInteger(@Frames.FrameCount)^;
+@@ -2974,7 +2987,7 @@ begin
+       Frames.FrameIndex := FrameIndex;
+       ColorData.CurrentColor :=
+           PInteger(
+-              FrameIndex * SizeOf(Integer) + SizeOf(TArcadeMapColorSequence) + PAnsiChar(Frames)
++              PAnsiChar(Frames) + FrameIndex * SizeOf(Integer) + SizeOf(TArcadeMapColorSequence)
+           )^;
+     end;
+     ColorData := Pointer(PAnsiChar(ColorData) + BlockBytes);
+diff --git a/source/core/EC_Str.pas b/source/core/EC_Str.pas
+index decd87a..3ba2a9b 100644
+--- a/source/core/EC_Str.pas
++++ b/source/core/EC_Str.pas
+@@ -1136,7 +1136,7 @@ begin
+   begin
+     while StartIndex <= TextLength - SearchLength do
+     begin
+-      if PWideChar(StartIndex * SizeOf(WideChar) + PAnsiChar(TextPtr))^ = SearchPtr^ then
++      if PWideChar(PAnsiChar(TextPtr) + StartIndex * SizeOf(WideChar))^ = SearchPtr^ then
+       begin
+         Result := StartIndex;
+         Exit
+@@ -1148,7 +1148,7 @@ begin
+     while StartIndex <= TextLength - SearchLength do
+     begin
+       if SysUtils.CompareMem(
+-          Pointer(StartIndex * SizeOf(WideChar) + PAnsiChar(TextPtr)),
++          Pointer(PAnsiChar(TextPtr) + StartIndex * SizeOf(WideChar)),
+           SearchPtr,
+           SearchLength * 2) then
+       begin
+diff --git a/source/core/aMyFunction.pas b/source/core/aMyFunction.pas
+index 36095e8..6e1b961 100644
+--- a/source/core/aMyFunction.pas
++++ b/source/core/aMyFunction.pas
+@@ -448,37 +448,37 @@ end;
+ 
+ function PointFromRadiusAngle(Radius, Angle: Single): TPointF;
+ var
+-  Sine, Cosine: Extended;
++  Sine, Cosine: Double;
+ begin
+   // FSINCOS kept both values at extended precision until the final Single stores.
+-  SinCos(Extended(Angle), Sine, Cosine);
++  SinCos(Angle, Sine, Cosine);
+   Result.X := Radius * Cosine;
+   Result.Y := Radius * Sine;
+ end;
+ 
+ function OffsetPointByRadiusAngle(Origin: TPointF; Radius, Angle: Single): TPointF;
+ var
+-  Sine, Cosine: Extended;
++  Sine, Cosine: Double;
+ begin
+-  SinCos(Extended(Angle), Sine, Cosine);
++  SinCos(Angle, Sine, Cosine);
+   Result.X := Radius * Cosine + Origin.X;
+   Result.Y := Radius * Sine + Origin.Y;
+ end;
+ 
+ function RotateAndTranslatePoint(Point, Translation: TPointF; Angle: Single): TPointF;
+ var
+-  Sine, Cosine: Extended;
++  Sine, Cosine: Double;
+ begin
+-  SinCos(Extended(Angle), Sine, Cosine);
++  SinCos(Angle, Sine, Cosine);
+   Result.X := Point.X * Cosine - Point.Y * Sine + Translation.X;
+   Result.Y := Point.Y * Cosine + Point.X * Sine + Translation.Y;
+ end;
+ 
+ function PolarToPoint(Polar: TPolarPoint): TPointF;
+ var
+-  Sine, Cosine: Extended;
++  Sine, Cosine: Double;
+ begin
+-  SinCos(Extended(Polar.AngleDegrees) * PolarDegreesToRadians, Sine, Cosine);
++  SinCos(Double(Polar.AngleDegrees) * PolarDegreesToRadians, Sine, Cosine);
+   Result.Y := -(Polar.Radius * Cosine);
+   Result.X := Polar.Radius * Sine;
+ end;
+diff --git a/source/graphics/GR_DX.pas b/source/graphics/GR_DX.pas
+index be7a584..e717667 100644
+--- a/source/graphics/GR_DX.pas
++++ b/source/graphics/GR_DX.pas
+@@ -420,7 +420,7 @@ begin
+     if Locked.Bits <> nil then
+       for Y := 0 to Desc.Height - 1 do
+         System.FillChar(
+-            Pointer(Pointer(Integer(Y) * Locked.Pitch + PAnsiChar(Locked.Bits)))^,
++            Pointer(Pointer(PAnsiChar(Locked.Bits) + Integer(Y) * Locked.Pitch))^,
+             Locked.Pitch,
+             0
+         );
+diff --git a/source/graphics/GR_gi.pas b/source/graphics/GR_gi.pas
+index 41e016b..5d39892 100644
+--- a/source/graphics/GR_gi.pas
++++ b/source/graphics/GR_gi.pas
+@@ -258,7 +258,7 @@ end;
+ 
+ function TgiGR.GetPlane(PlaneIndex: Integer): PgiPlaneGR;
+ begin
+-  Result := Pointer(PlaneIndex * SizeOf(TgiPlaneGR) + SizeOf(TgiHeaderGR) + PAnsiChar(Data));
++  Result := Pointer(PAnsiChar(Data) + PlaneIndex * SizeOf(TgiPlaneGR) + SizeOf(TgiHeaderGR));
+ end;
+ 
+ function TgiGR.GetClipRectCount: Integer;
+@@ -467,7 +467,7 @@ begin
+           X + Plane.Bounds.Left - Header.Bounds.Left,
+           Y + Plane.Bounds.Top - Header.Bounds.Top,
+           Pointer(PAnsiChar(Data) + Plane.DataOffset),
+-          Pointer(PalettePlane.DataOffset + PAnsiChar(Data)),
++          Pointer(PAnsiChar(Data) + PalettePlane.DataOffset),
+           Header.Bounds.Right - Header.Bounds.Left,
+           Header.Bounds.Right - Header.Bounds.Left,
+           Header.Bounds.Bottom - Header.Bounds.Top,
+diff --git a/source/resources/EC_Buf.pas b/source/resources/EC_Buf.pas
+index 86528d3..cb5a612 100644
+--- a/source/resources/EC_Buf.pas
++++ b/source/resources/EC_Buf.pas
+@@ -800,7 +800,7 @@ begin
+   PCardinal(PAnsiChar(Data) + CrcOffset)^ := WholeCrc;
+   NewPrefixCrc :=
+       ExtendCrc32(0, Pointer(PAnsiChar(Data) + StartOffset), CrcOffset - StartOffset + 4);
+-  WriteCrc32Correction(NewPrefixCrc, PreviousPrefixCrc, Pointer(CrcOffset + 4 + PAnsiChar(Data)));
++  WriteCrc32Correction(NewPrefixCrc, PreviousPrefixCrc, Pointer(PAnsiChar(Data) + CrcOffset + 4));
+ end;
+ 
+ procedure TBufEC.LoadFromFileChunk(SourceFile: TFileEC; ByteCount: Integer);

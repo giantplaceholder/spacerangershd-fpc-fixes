@@ -1,0 +1,512 @@
+diff --git a/platform/GameGraphics.pas b/platform/GameGraphics.pas
+index 1aca9ba..ea4ed19 100644
+--- a/platform/GameGraphics.pas
++++ b/platform/GameGraphics.pas
+@@ -530,11 +530,16 @@ begin
+   if Params.Windowed and ((Params.BackBufferWidth = 0) or (Params.BackBufferHeight = 0)) then
+   begin
+     Require(GameSDLWindow <> nil, 'window for automatic back-buffer size');
+-    SDL_GetWindowSize(GameSDLWindow, WindowWidth, WindowHeight);
+-    if Params.BackBufferWidth = 0 then
+-      Params.BackBufferWidth := WindowWidth;
+-    if Params.BackBufferHeight = 0 then
+-      Params.BackBufferHeight := WindowHeight;
++    // Do not use GetWindowSize here: if we are still fullscreen-desktop the
++    // client is the native display and 1280x720 becomes a fake "window" at 1080p.
++    if GameWindowed then
++    begin
++      SDL_GetWindowSize(GameSDLWindow, WindowWidth, WindowHeight);
++      if Params.BackBufferWidth = 0 then
++        Params.BackBufferWidth := WindowWidth;
++      if Params.BackBufferHeight = 0 then
++        Params.BackBufferHeight := WindowHeight;
++    end;
+   end;
+   OpenGameWindow(
+       Params.BackBufferWidth,
+@@ -716,6 +721,9 @@ var
+   Texture: PSDL_Texture;
+   Index: SizeInt;
+   Color: Cardinal;
++  OutW, OutH: Integer;
++  Dest: TSDL_Rect;
++  Scale: Double;
+ begin
+   TestCooperativeLevel;
+   Screen := ImageOf(ScreenSurface);
+@@ -748,14 +756,49 @@ begin
+     Texture := GammaTexture;
+   end;
+   Check(SDL_SetRenderTarget(GameSDLRenderer, nil));
+-  // Use the same SDL logical view that transforms mouse events. Manual scaling
+-  // in physical pixels would give SDL2-compat's Retina events a different scale.
+-  Check(SDL_RenderSetLogicalSize(GameSDLRenderer, Screen.Desc.Width, Screen.Desc.Height));
++  ApplyIntegerScale;
+   Check(SDL_RenderSetClipRect(GameSDLRenderer, nil));
+   Check(SDL_SetRenderDrawColor(GameSDLRenderer, 0, 0, 0, 255));
+   Check(SDL_RenderClear(GameSDLRenderer));
+   Check(SDL_SetTextureBlendMode(Texture, SDL_BLENDMODE_NONE));
+-  Check(SDL_RenderCopy(GameSDLRenderer, Texture, nil, nil));
++  if GameWindowed then
++  begin
++    Check(SDL_RenderSetLogicalSize(GameSDLRenderer, 0, 0));
++    SDL_RenderSetIntegerScale(GameSDLRenderer, 0);
++    SDL_SetTextureScaleMode(Texture, 0);
++    Dest.X := 0;
++    Dest.Y := 0;
++    Dest.W := Screen.Desc.Width;
++    Dest.H := Screen.Desc.Height;
++    Check(SDL_RenderCopy(GameSDLRenderer, Texture, nil, @Dest));
++  end
++  else if GameIntegerScaled then
++  begin
++    Check(SDL_RenderSetLogicalSize(GameSDLRenderer, Screen.Desc.Width, Screen.Desc.Height));
++    SDL_SetTextureScaleMode(Texture, 0);
++    Check(SDL_RenderCopy(GameSDLRenderer, Texture, nil, nil));
++  end
++  else
++  begin
++    Check(SDL_RenderSetLogicalSize(GameSDLRenderer, 0, 0));
++    SDL_RenderSetIntegerScale(GameSDLRenderer, 0);
++    SDL_SetTextureScaleMode(Texture, 1);
++    GameOutputSize(OutW, OutH);
++    if OutW < 1 then
++      OutW := Screen.Desc.Width;
++    if OutH < 1 then
++      OutH := Screen.Desc.Height;
++    // Letterbox: keep aspect. Filling the panel squashs 1920x1200 onto 16:9.
++    if (Screen.Desc.Width > 0) and (Screen.Desc.Height > 0) then
++      Scale := Min(OutW / Screen.Desc.Width, OutH / Screen.Desc.Height)
++    else
++      Scale := 1;
++    Dest.W := Round(Screen.Desc.Width * Scale);
++    Dest.H := Round(Screen.Desc.Height * Scale);
++    Dest.X := (OutW - Dest.W) div 2;
++    Dest.Y := (OutH - Dest.H) div 2;
++    Check(SDL_RenderCopy(GameSDLRenderer, Texture, nil, @Dest));
++  end;
+   SDL_RenderPresent(GameSDLRenderer);
+   // A device reset may have happened in Present itself. Never rebind the old
+   // target handle: D3D11 has already freed its backend storage at this point.
+diff --git a/platform/GameWindow.pas b/platform/GameWindow.pas
+index 73fbd7a..7ab4461 100644
+--- a/platform/GameWindow.pas
++++ b/platform/GameWindow.pas
+@@ -26,6 +26,9 @@ function GameKeyState(Key: Integer): SmallInt;
+ function GameDoubleClickTime: Cardinal;
+ procedure GetGameMouse(out Point: TPoint);
+ procedure WarpGameMouse(X, Y: Integer);
++procedure ConfineGameMouse;
++procedure ApplyIntegerScale;
++procedure GameOutputSize(out W, H: Integer);
+ function ShowGameCursor(Show: Boolean): Integer;
+ procedure SetGameWindowTitle(const Title: UnicodeString);
+ procedure MinimizeGameWindow;
+@@ -43,12 +46,17 @@ var
+   GameSDLWindow: PSDL_Window;
+   GameSDLRenderer: PSDL_Renderer;
+   GameTextureGeneration, GameTargetGeneration: LongInt;
++  GameWindowed: Boolean;
++  GameIntegerScaled: Boolean;
+ 
+ implementation
+ 
+ uses
+ {$IFDEF DARWIN}
+   GameCocoaCursor,
++{$ENDIF}
++{$IFDEF MSWINDOWS}
++  MMSystem,
+ {$ENDIF}
+   SysUtils,
+   Math,
+@@ -103,6 +111,9 @@ begin
+ {$ENDIF}
+ end;
+ 
++function WindowPixelScale: Double; forward;
++procedure MouseWindowToLogical(var X, Y: Integer); forward;
++
+ procedure InitializeGameVideo;
+ var
+   Driver: string;
+@@ -117,6 +128,28 @@ begin
+       [exInvalidOp, exDenormalized, exZeroDivide, exOverflow, exUnderflow, exPrecision]
+   );
+   SDL_SetMainReady;
++{$IFDEF MSWINDOWS}
++  timeBeginPeriod(1);
++{$ENDIF}
++{$IFDEF MSWINDOWS}
++  // Points as SDL units; implies per-monitor awareness and ALLOW_HIGHDPI.
++  // Do not also set SDL_WINDOWS_DPI_AWARENESS (that forces 1 unit = 1 pixel).
++  SDL_SetHint(PAnsiChar('SDL_WINDOWS_DPI_SCALING'), PAnsiChar('1'));
++  SDL_SetHint(PAnsiChar('SDL_MOUSE_RELATIVE_SCALING'), PAnsiChar('1'));
++{$ENDIF}
++  // Fullscreen SDL windows default to minimizing when they lose focus. On KDE Plasma that leaves
++  // a process running that cannot be raised from the taskbar under Wayland focus rules.
++  // Prefer staying mapped, unless a better workaround will be found.
++  SDL_SetHint(PAnsiChar('SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS'), PAnsiChar('0'));
++  // Touchpads (Steam Deck trackpads) should synthesize mouse events.
++  SDL_SetHint(PAnsiChar('SDL_TOUCH_MOUSE_EVENTS'), PAnsiChar('1'));
++  SDL_SetHint(PAnsiChar('SDL_MOUSE_TOUCH_EVENTS'), PAnsiChar('0'));
++  // Prefer X11 on Linux when available: Wayland + KWin often refuses to raise
++  // an already-created surface. Users can force Wayland with SDL_VIDEODRIVER.
++{$IFDEF LINUX}
++  if GetEnvironmentVariable('SDL_VIDEODRIVER') = '' then
++    SDL_SetHint(PAnsiChar('SDL_VIDEODRIVER'), PAnsiChar('x11'));
++{$ENDIF}
+   CheckSDL(SDL_InitSubSystem(SDL_INIT_VIDEO or SDL_INIT_TIMER));
+   // These desktop backends provide real global coordinates. Other backends
+   // (notably Wayland) may return cached window coordinates from the same API.
+@@ -135,11 +168,14 @@ var
+   PreviousTarget: PSDL_Texture;
+   TargetGeneration: LongInt;
+   Created: Boolean;
++  Scale: Double;
++  PointW, PointH: Integer;
+ begin
+   InitializeGameVideo;
+   TargetGeneration := GameTargetGeneration;
+   LogicalWidth := Width;
+   LogicalHeight := Height;
++  GameWindowed := Windowed;
+   Created := GameSDLWindow = nil;
+   if Created then
+   begin
+@@ -173,11 +209,52 @@ begin
+     end;
+     SDL_StartTextInput;
+   end;
+-  SDL_SetWindowSize(GameSDLWindow, Width, Height);
+-  Flags := 0;
+-  if not Windowed then
+-    Flags := SDL_WINDOW_FULLSCREEN_DESKTOP;
+-  CheckSDL(SDL_SetWindowFullscreen(GameSDLWindow, Flags));
++  if Windowed then
++  begin
++    CheckSDL(SDL_SetWindowFullscreen(GameSDLWindow, 0));
++    SDL_RestoreWindow(GameSDLWindow);
++    SDL_SetWindowBordered(GameSDLWindow, 1);
++    // DPI_SCALING units are points. 1024x768 points at 150% is 1536x1152
++    // pixels, larger than a 1920x1080 panel, so Windows clamps the window
++    // to the desktop and the 1024 buffer is stretched. Request a point size
++    // whose pixel client equals the game resolution.
++    Scale := WindowPixelScale;
++    PointW := Width;
++    PointH := Height;
++    if Scale > 1.01 then
++    begin
++      PointW := Round(Width / Scale);
++      PointH := Round(Height / Scale);
++      if PointW < 160 then
++        PointW := 160;
++      if PointH < 120 then
++        PointH := 120;
++    end;
++    SDL_SetWindowSize(GameSDLWindow, PointW, PointH);
++    SDL_SetWindowPosition(GameSDLWindow, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
++    SDL_SetWindowSize(GameSDLWindow, PointW, PointH);
++    Flags := SDL_GetWindowFlags(GameSDLWindow);
++    if (Flags and SDL_WINDOW_FULLSCREEN_DESKTOP) <> 0 then
++    begin
++      CheckSDL(SDL_SetWindowFullscreen(GameSDLWindow, 0));
++      SDL_RestoreWindow(GameSDLWindow);
++      SDL_SetWindowSize(GameSDLWindow, PointW, PointH);
++    end;
++  end
++  else
++  begin
++    SDL_SetWindowSize(GameSDLWindow, Width, Height);
++    CheckSDL(SDL_SetWindowFullscreen(GameSDLWindow, SDL_WINDOW_FULLSCREEN_DESKTOP));
++  end;
++  // Ensure the surface is mapped and activated. On KDE Plasma and GNOME
++  // a fullscreen window that starts without a successful activation token can
++  // sit behind DE and never accept restore clicks.
++  SDL_ShowWindow(GameSDLWindow);
++  SDL_RestoreWindow(GameSDLWindow);
++  SDL_RaiseWindow(GameSDLWindow);
++  // Take input focus so mouse events (or Deck trackpad input) will reach the window.
++  SDL_SetWindowInputFocus(GameSDLWindow);
++  SDL_SetWindowGrab(GameSDLWindow, 0);
+   // Configure the window view, not an offscreen texture's view. SDL then maps
+   // mouse events and the presented frame to the same logical resolution,
+   // including Retina pixels; disabling this leaves SDL2-compat events scaled.
+@@ -187,10 +264,12 @@ begin
+   CheckSDL(SDL_SetRenderTarget(GameSDLRenderer, nil));
+   try
+     CheckSDL(SDL_RenderSetLogicalSize(GameSDLRenderer, Width, Height));
++    ApplyIntegerScale;
+   finally
+     CheckSDL(SDL_SetRenderTarget(GameSDLRenderer, PreviousTarget));
+   end;
+   CheckSDL(SDL_RenderSetVSync(GameSDLRenderer, Ord(VSync)));
++  ConfineGameMouse;
+   SDL_ShowCursor(Ord(CursorCount >= 0));
+   if Created then
+   begin
+@@ -302,6 +381,129 @@ begin
+   OffsetY := Trunc((Height - LogicalHeight * Scale) / 2);
+ end;
+ 
++
++procedure MouseWindowToLogical(var X, Y: Integer);
++var
++  LX, LY: Single;
++  WW, WH, PixW, PixH: Integer;
++begin
++  if (LogicalWidth <= 0) or (LogicalHeight <= 0) then
++    Exit;
++  // SDL motion is already in logical pixels when RenderSetLogicalSize is set.
++  // Only convert values that are clearly in window/pixel space (past the
++  // backbuffer), otherwise clicks shift up-left.
++  if (X <= LogicalWidth) and (Y <= LogicalHeight) then
++    Exit;
++  if GameSDLRenderer <> nil then
++    if SDL_RenderWindowToLogical(GameSDLRenderer, X, Y, LX, LY) = 0 then
++    begin
++      X := Round(LX);
++      Y := Round(LY);
++      Exit;
++    end;
++  if GameSDLWindow = nil then
++    Exit;
++  SDL_GetWindowSize(GameSDLWindow, WW, WH);
++  PixW := 0;
++  PixH := 0;
++  SDL_GetWindowSizeInPixels(GameSDLWindow, PixW, PixH);
++  if PixW > WW then
++  begin
++    WW := PixW;
++    WH := PixH;
++  end;
++  if WW > 0 then
++    X := X * LogicalWidth div WW;
++  if WH > 0 then
++    Y := Y * LogicalHeight div WH;
++end;
++
++
++procedure GameOutputSize(out W, H: Integer);
++var
++  WW, WH, PW, PH, OW, OH: Integer;
++begin
++  W := 0;
++  H := 0;
++  WW := 0;
++  WH := 0;
++  PW := 0;
++  PH := 0;
++  OW := 0;
++  OH := 0;
++  if GameSDLWindow <> nil then
++  begin
++    SDL_GetWindowSize(GameSDLWindow, WW, WH);
++    SDL_GetWindowSizeInPixels(GameSDLWindow, PW, PH);
++  end;
++  if GameSDLRenderer <> nil then
++    SDL_GetRendererOutputSize(GameSDLRenderer, OW, OH);
++  W := WW;
++  H := WH;
++  if PW > W then
++  begin
++    W := PW;
++    H := PH;
++  end;
++  if OW > W then
++  begin
++    W := OW;
++    H := OH;
++  end;
++end;
++
++function IntegerScaleFits(BufW, BufH, OutW, OutH: Integer): Boolean;
++begin
++  Result :=
++      (BufW > 0) and (BufH > 0) and (OutW > 0) and (OutH > 0)
++          and (OutW mod BufW = 0) and (OutH mod BufH = 0)
++          and (OutW div BufW >= 2);
++end;
++
++procedure ApplyIntegerScale;
++var
++  WinW, WinH, PixW, PixH: Integer;
++begin
++  if GameSDLRenderer = nil then
++    Exit;
++  WinW := 0;
++  WinH := 0;
++  PixW := 0;
++  PixH := 0;
++  if GameSDLWindow <> nil then
++  begin
++    SDL_GetWindowSize(GameSDLWindow, WinW, WinH);
++    SDL_GetWindowSizeInPixels(GameSDLWindow, PixW, PixH);
++  end;
++  // Any integer multiple: 1280x720 on 2560x1440, 1024x768 on 2048x1536,
++  // 1920x1080 on 3840x2160, 3x, etc. Points or pixels, whichever divides.
++  GameIntegerScaled :=
++      (not GameWindowed)
++          and (IntegerScaleFits(LogicalWidth, LogicalHeight, PixW, PixH)
++              or IntegerScaleFits(LogicalWidth, LogicalHeight, WinW, WinH));
++  if GameIntegerScaled then
++    SDL_RenderSetIntegerScale(GameSDLRenderer, 1)
++  else
++    SDL_RenderSetIntegerScale(GameSDLRenderer, 0);
++end;
++
++function WindowPixelScale: Double;
++var
++  WW, WH, PW, PH: Integer;
++begin
++  Result := 1;
++  if GameSDLWindow = nil then
++    Exit;
++  SDL_GetWindowSize(GameSDLWindow, WW, WH);
++  PW := 0;
++  PH := 0;
++  SDL_GetWindowSizeInPixels(GameSDLWindow, PW, PH);
++  if (WW > 0) and (PW > 0) then
++    Result := PW / WW;
++  if Result < 0.5 then
++    Result := 1;
++end;
++
+ function WindowPoint(X, Y: Integer): TPoint;
+ var
+   Scale: Double;
+@@ -419,8 +621,18 @@ begin
+       SDL_MOUSEMOTION:
+       begin
+         Message.Message := WM_MOUSEMOVE;
++        X := Event.Motion.X;
++        Y := Event.Motion.Y;
++        if GameIntegerScaled then
++          MouseWindowToLogical(X, Y)
++        else
++        begin
++          Point := WindowPoint(X, Y);
++          X := Point.X;
++          Y := Point.Y;
++        end;
+         Message.WParam := MouseKeys(Event.Motion.State);
+-        Message.LParam := PackPoint(Event.Motion.X, Event.Motion.Y);
++        Message.LParam := PackPoint(X, Y);
+         Exit;
+       end;
+       SDL_MOUSEBUTTONDOWN, SDL_MOUSEBUTTONUP:
+@@ -436,8 +648,18 @@ begin
+           Inc(Message.Message)
+         else if Event.Button.Clicks = 2 then
+           Inc(Message.Message, 2);
++        X := Event.Button.X;
++        Y := Event.Button.Y;
++        if GameIntegerScaled then
++          MouseWindowToLogical(X, Y)
++        else
++        begin
++          Point := WindowPoint(X, Y);
++          X := Point.X;
++          Y := Point.Y;
++        end;
+         Message.WParam := MouseKeys(SDL_GetMouseState(nil, nil));
+-        Message.LParam := PackPoint(Event.Button.X, Event.Button.Y);
++        Message.LParam := PackPoint(X, Y);
+         Exit;
+       end;
+       SDL_MOUSEWHEEL:
+@@ -521,7 +743,10 @@ procedure GetGameMouse(out Point: TPoint);
+ var
+   X, Y, WindowX, WindowY: Integer;
+ begin
+-  if (GameSDLWindow <> nil) and DesktopMouseAvailable then
++  if (GameSDLWindow <> nil) and (SDL_GetMouseFocus = GameSDLWindow) then
++    // Focused: window-local coordinates (required for Deck trackpads to work properly)
++    SDL_GetMouseState(@X, @Y)
++  else if (GameSDLWindow <> nil) and DesktopMouseAvailable then
+   begin
+     // The original GetCursorPos + ScreenToClient also works outside the window.
+     // SDL_GetMouseState stays at its last (clamped) position on mouse leave,
+@@ -531,7 +756,7 @@ begin
+     Dec(X, WindowX);
+     Dec(Y, WindowY);
+   end
+-  else if (GameSDLWindow <> nil) and (SDL_GetMouseFocus <> GameSDLWindow) then
++  else if GameSDLWindow <> nil then
+   begin
+     // Without desktop coordinates, only the fact that the mouse is outside is
+     // known. Keep its software image and hover hit tests outside the game too.
+@@ -545,18 +770,64 @@ begin
+     Point := Types.Point(X, Y);
+     Exit;
+   end;
++{$IFDEF MSWINDOWS}
++  if GameIntegerScaled then
++  begin
++    MouseWindowToLogical(X, Y);
++    Point := Types.Point(X, Y);
++  end
++  else
++    Point := WindowPoint(X, Y);
++{$ELSE}
+   Point := WindowPoint(X, Y);
++{$ENDIF}
++end;
++
++procedure ConfineGameMouse;
++var
++  Bounds: TSDL_Rect;
++  WW, WH: Integer;
++begin
++  if GameSDLWindow = nil then
++    Exit;
++  if GameWindowed then
++  begin
++    SDL_SetWindowMouseRect(GameSDLWindow, nil);
++    Exit;
++  end;
++  if (LogicalWidth <= 0) or (LogicalHeight <= 0) then
++    Exit;
++  SDL_GetWindowSize(GameSDLWindow, WW, WH);
++  Bounds.X := 0;
++  Bounds.Y := 0;
++  Bounds.W := WW;
++  Bounds.H := WH;
++  if Bounds.W < 1 then
++    Bounds.W := LogicalWidth;
++  if Bounds.H < 1 then
++    Bounds.H := LogicalHeight;
++  SDL_SetWindowMouseRect(GameSDLWindow, @Bounds);
+ end;
+ 
+ procedure WarpGameMouse(X, Y: Integer);
+ var
+   OffsetX, OffsetY: Integer;
+   Scale: Double;
++  WX, WY: Integer;
+ begin
+-  if GameSDLRenderer = nil then
++  if GameSDLWindow = nil then
+     Exit;
++{$IFDEF MSWINDOWS}
++  WX := X;
++  WY := Y;
++  if (GameSDLRenderer <> nil) and (SDL_RenderLogicalToWindow(GameSDLRenderer, X, Y, WX, WY) = 0) then
++    SDL_WarpMouseInWindow(GameSDLWindow, WX, WY)
++  else
++    SDL_WarpMouseInWindow(GameSDLWindow, X, Y);
++{$ELSE}
+   WindowTransform(Scale, OffsetX, OffsetY);
+   SDL_WarpMouseInWindow(GameSDLWindow, Round(X * Scale) + OffsetX, Round(Y * Scale) + OffsetY);
++{$ENDIF}
+ end;
+ 
+ function ShowGameCursor(Show: Boolean): Integer;
+@@ -698,5 +969,7 @@ finalization
+   begin
+     SDL_DelEventWatch(WatchRendererReset, nil);
+     SDL_QuitSubSystem(SDL_INIT_VIDEO or SDL_INIT_TIMER);
++    VideoInitialized := False;
+   end;
++  SDL_Quit;
+ end.
