@@ -85,7 +85,7 @@ cp spacerangershd-fpc-fixes/*.patch SpaceRangersHD_FPC/
 
 ```
 cd SpaceRangersHD_FPC
-for p in {01..13}-*.patch; do git apply --check "$p" || break; done
+for p in {01..13}-*.patch; do git apply "$p" || break; done
 ```
 
 Now you can try to build binaries:
