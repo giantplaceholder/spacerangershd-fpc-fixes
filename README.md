@@ -31,13 +31,7 @@ Bottom line: I had some extra time, so I decided to patch stuff up.
 
 # What has been fixed?
 
-<<<<<<< HEAD
-Apart from build system - mainly SDL integration.
-
-Now we have DPI awareness, proper windowed mode support, integer scaling support, pillar-boxed non-integer scaling, (mostly) proper pointer clamping across all modes, and so on and so on.
-=======
 Apart from build system - mainly SDL integration. Now we have DPI awareness, proper windowed mode support, integer scaling support, pillar-boxed non-integer scaling, (mostly) pointer clamping across all modes, and so on and so on.
->>>>>>> f27d159 (Support for building on Windows, new build documentation, relicense under MIT)
 
 I have also fixed a couple of crashes that upstream is yet to fix, and added a bit of polish so Steam Deck trackpads would work properly too.
 
@@ -61,54 +55,7 @@ I see no reason why this won't build on any other recent Linux, but you'll have 
 
 This section has gotten way too big and was moved to a separate document, see [BUILD](docs/BUILD.md).
 
-<<<<<<< HEAD
-Ubuntu 24.04 & Linux Mint Xia: 
-
-```
-sudo apt update && sudo apt install -y build-essential git python3 cmake make pkg-config fpc fp-compiler libsdl2-dev libogg-dev libvorbis-dev libjpeg-turbo8-dev libpng-dev zlib1g-dev libxvidcore-dev libxvidcore4 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 mingw-w64-tools unzip wget ca-certificates clang lld
-```
-
-Debian Trixie:
-
-```
-sudo apt update && sudo apt install -y build-essential git python3 cmake make pkg-config fpc libsdl2-dev libogg-dev libvorbis-dev libjpeg-dev libpng-dev zlib1g-dev libxvidcore-dev gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 mingw-w64-tools unzip wget ca-certificates clang lld
-```
-
-- Clone upstream:
-
-```
-git clone https://github.com/pakompom/SpaceRangersHD_FPC.git
-cd SpaceRangersHD_FPC
-git checkout --detach 5f491a841cbd11d2a9a6861a822a08ffa64d15f2
-git submodule update --init --recursive
-git -C vendor/fpc checkout --detach 3a1c9cfae7f7a2bb17079b2989f562dbc5728b01
-git -C vendor/okgf checkout --detach c01aa7a168a6f1772541501074b7bba1b96550ef
-cd ..
-```
-- Clone this repo:
-
-```
-git clone https://github.com/giantplaceholder/spacerangershd-fpc-fixes.git
-cp spacerangershd-fpc-fixes/*.patch SpaceRangersHD_FPC/
-```
-
-- Apply the patches:
-
-```
-cd SpaceRangersHD_FPC
-for p in {01..13}-*.patch; do git apply "$p" || break; done
-```
-
-Now you can try to build binaries:
-
-- For Linux, vendored fpc: `./tools/build.py --target linux --release`
-- For Linux, system fpc: `./tools/build.py --target linux --release --system-fpc`
-- For Windows: `./tools/build.py --target windows --release`
-
-**NB:** an active internet connection is **REQUIRED** for Windows builds to complete, as mingw will download required dependencies. First build might take a while.
-=======
 **NB:** an active internet connection is **REQUIRED** for Windows target builds to complete, as mingw will live-download required dependencies. First build might take a while.
->>>>>>> f27d159 (Support for building on Windows, new build documentation, relicense under MIT)
 
 **NB:** LTO builds are broken as of now, and static builds are still WIP and largely untested due to their low priority.
 
