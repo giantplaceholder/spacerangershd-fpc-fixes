@@ -49,7 +49,7 @@ sudo apt update && sudo apt install -y build-essential git python3 cmake make pk
 
 Make sure that you add both Python and Git to the PATH during their installation processes (tick required boxes).
 
-Windows 7 users are required to read [BUILD_WIN7](docs/BUILD_WIN7.md) in order to supply additional deps.
+Windows 7 users are required to read [BUILD_WIN7](BUILD_WIN7.md) in order to supply additional deps.
 
 # Build on Linux
 
