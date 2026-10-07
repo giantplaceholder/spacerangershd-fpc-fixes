@@ -1,0 +1,497 @@
+diff --git a/native/CMakeLists.txt b/native/CMakeLists.txt
+--- a/native/CMakeLists.txt
++++ b/native/CMakeLists.txt
+@@ -40,4 +40,7 @@ if(WIN32)
+     target_link_libraries(okgf PRIVATE "${JPEG_LIBRARY}")
+     message(STATUS "OKGF static jpeg: ${JPEG_LIBRARY}")
+   endif()
++  if(WINPTHREAD_STATIC)
++    target_link_libraries(okgf PRIVATE "${WINPTHREAD_STATIC}")
++  endif()
+ endif()
+diff --git a/tools/build-windows.cmd b/tools/build-windows.cmd
+new file mode 100644
+--- /dev/null
++++ b/tools/build-windows.cmd
+@@ -0,0 +1,10 @@
++@echo off
++setlocal
++cd /d "%~dp0\.."
++where py >nul 2>&1 && set PY=py -3
++if not defined PY where python >nul 2>&1 && set PY=python
++if not defined PY (
++  echo Install Python 3 from https://www.python.org/downloads/ and re-run.
++  exit /b 1
++)
++%PY% tools\build.py --target windows --release %*
+diff --git a/tools/build.py b/tools/build.py
+--- a/tools/build.py
++++ b/tools/build.py
+@@ -7,7 +7,10 @@ import json
+ import os
+ import plistlib
+ import re
+-import resource
++try:
++    import resource
++except ImportError:
++    resource = None
+ import shlex
+ import shutil
+ import subprocess
+@@ -16,6 +19,7 @@ import zipfile
+ from pathlib import Path
+ 
+ from compiler import prepare_compiler, prepare_windows_cross
++import winhost
+ from targets import desktop_directory, desktop_target
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+@@ -28,7 +32,8 @@ def mingw_safe_dir(path: Path) -> Path:
+     text = str(path)
+     if not any(ch in text for ch in " ()[]{}&;!$`"):
+         return path
+-    alt = Path("/tmp") / ("srhd-mingw-" + hashlib.sha1(text.encode()).hexdigest()[:12])
++    import tempfile
++    alt = Path(tempfile.gettempdir()) / ("srhd-mingw-" + hashlib.sha1(text.encode()).hexdigest()[:12])
+     alt.mkdir(parents=True, exist_ok=True)
+     print(f"Using scratch dir {alt} (path contains shell-special characters)", flush=True)
+     return alt
+@@ -869,7 +874,7 @@ def build_mingw_image_deps(work: Path) -> Path:
+     stamp = prefix_dir / '.stamp'
+     if stamp.is_file() and stamp.read_text().strip() == 'okgf-static-5' and (prefix_dir / 'lib').is_dir():
+         return prefix_dir
+-    gcc = require_tool('x86_64-w64-mingw32-gcc')
++    gcc = winhost.tool('gcc')
+     prefix_dir.mkdir(parents=True, exist_ok=True)
+     src_root = mingw_safe_dir(work) / 'mingw-deps-src'
+     src_root.mkdir(parents=True, exist_ok=True)
+@@ -883,7 +888,7 @@ def build_mingw_image_deps(work: Path) -> Path:
+             print(f'Downloading zlib {zver}…', flush=True)
+             urllib.request.urlretrieve(f'https://github.com/madler/zlib/releases/download/v{zver}/zlib-{zver}.tar.gz', za)
+         with tarfile.open(za) as tf: tf.extractall(src_root)
+-    run(['cmake','-S',str(zdir),'-B',str(zdir/'build'),'-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64',f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={require_tool("x86_64-w64-mingw32-g++")}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DBUILD_SHARED_LIBS=OFF'], src_root)
++    run(['cmake','-S',str(zdir),'-B',str(zdir/'build'),*((['-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64']) if winhost.prefix() else []),f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={winhost.tool("g++")}',f'-DCMAKE_RC_COMPILER={winhost.rc_compiler()}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DBUILD_SHARED_LIBS=OFF'], src_root)
+     run(['cmake','--build',str(zdir/'build'),'-j1'], src_root)
+     run(['cmake','--install',str(zdir/'build')], src_root)
+     for leftover in list(prefix_dir.rglob('zlib*.dll')) + list(prefix_dir.rglob('libzlib*.dll')) + list(prefix_dir.rglob('libz.dll')):
+@@ -897,7 +902,7 @@ def build_mingw_image_deps(work: Path) -> Path:
+             print(f'Downloading libpng {pver}…', flush=True)
+             urllib.request.urlretrieve(f'https://download.sourceforge.net/libpng/libpng-{pver}.tar.gz', pa)
+         with tarfile.open(pa) as tf: tf.extractall(src_root)
+-    run(['cmake','-S',str(pdir),'-B',str(pdir/'build'),'-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64',f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={require_tool("x86_64-w64-mingw32-g++")}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}',f'-DCMAKE_PREFIX_PATH={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DPNG_SHARED=OFF','-DPNG_STATIC=ON','-DPNG_TESTS=OFF','-DBUILD_SHARED_LIBS=OFF'], src_root)
++    run(['cmake','-S',str(pdir),'-B',str(pdir/'build'),*((['-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64']) if winhost.prefix() else []),f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={winhost.tool("g++")}',f'-DCMAKE_RC_COMPILER={winhost.rc_compiler()}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}',f'-DCMAKE_PREFIX_PATH={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DPNG_SHARED=OFF','-DPNG_STATIC=ON','-DPNG_TESTS=OFF','-DBUILD_SHARED_LIBS=OFF'], src_root)
+     run(['cmake','--build',str(pdir/'build'),'-j1'], src_root)
+     run(['cmake','--install',str(pdir/'build')], src_root)
+     jver = '3.0.3'
+@@ -908,7 +913,7 @@ def build_mingw_image_deps(work: Path) -> Path:
+             print(f'Downloading libjpeg-turbo {jver}…', flush=True)
+             urllib.request.urlretrieve(f'https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/{jver}/libjpeg-turbo-{jver}.tar.gz', ja)
+         with tarfile.open(ja) as tf: tf.extractall(src_root)
+-    run(['cmake','-S',str(jdir),'-B',str(jdir/'build'),'-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64',f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={require_tool("x86_64-w64-mingw32-g++")}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DENABLE_SHARED=OFF','-DENABLE_STATIC=ON','-DBUILD_SHARED_LIBS=OFF'], src_root)
++    run(['cmake','-S',str(jdir),'-B',str(jdir/'build'),*((['-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64']) if winhost.prefix() else []),f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={winhost.tool("g++")}',f'-DCMAKE_RC_COMPILER={winhost.rc_compiler()}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DENABLE_SHARED=OFF','-DENABLE_STATIC=ON','-DBUILD_SHARED_LIBS=OFF'], src_root)
+     run(['cmake','--build',str(jdir/'build'),'-j1'], src_root)
+     run(['cmake','--install',str(jdir/'build')], src_root)
+     for leftover in prefix_dir.rglob('*.dll'):
+@@ -933,7 +938,7 @@ def build_mingw_ogg_vorbis(work: Path) -> Path:
+     need = ("ogg.dll", "libvorbis.dll", "vorbisfile.dll")
+     if stamp.is_file() and stamp.read_text().strip() == "shared-8" and all((prefix_dir / "bin" / n).is_file() for n in need):
+         return prefix_dir
+-    gcc = require_tool("x86_64-w64-mingw32-gcc")
++    gcc = winhost.tool("gcc")
+     prefix_dir.mkdir(parents=True, exist_ok=True)
+     src_root = mingw_safe_dir(work) / "mingw-oggvorbis-src"
+     src_root.mkdir(parents=True, exist_ok=True)
+@@ -953,15 +958,14 @@ def build_mingw_ogg_vorbis(work: Path) -> Path:
+         if not oa.is_file():
+             print(f"Downloading libogg {over}…", flush=True)
+             urllib.request.urlretrieve(
+-                f"https://downloads.xiph.org/releases/ogg/libogg-{over}.tar.gz", oa
++                f"https://github.com/xiph/ogg/releases/download/v{over}/libogg-{over}.tar.gz", oa
+             )
+         with tarfile.open(oa) as tf:
+             tf.extractall(src_root)
+-    gxx = require_tool("x86_64-w64-mingw32-g++")
+-    windres = shutil.which("x86_64-w64-mingw32-windres") or str(gcc)
++    gxx = winhost.tool("g++")
++    windres = winhost.rc_compiler()
+     cross = [
+-        "-DCMAKE_SYSTEM_NAME=Windows",
+-        "-DCMAKE_SYSTEM_PROCESSOR=x86_64",
++        *((["-DCMAKE_SYSTEM_NAME=Windows", "-DCMAKE_SYSTEM_PROCESSOR=x86_64"]) if winhost.prefix() else []),
+         f"-DCMAKE_C_COMPILER={gcc}",
+         f"-DCMAKE_CXX_COMPILER={gxx}",
+         f"-DCMAKE_RC_COMPILER={windres}",
+@@ -973,8 +977,11 @@ def build_mingw_ogg_vorbis(work: Path) -> Path:
+         *cross,
+         f"-DCMAKE_INSTALL_PREFIX={prefix_dir}",
+         "-DCMAKE_BUILD_TYPE=Release",
++        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+         "-DBUILD_SHARED_LIBS=ON",
+         "-DCMAKE_SHARED_LIBRARY_PREFIX=",
++        "-DCMAKE_SHARED_LINKER_FLAGS=-static-libgcc -static-libstdc++ -Wl,-Bstatic,-lwinpthread,-lssp,-Bdynamic",
++        "-DCMAKE_C_STANDARD_LIBRARIES="+winhost.static_runtime(),
+         "-DINSTALL_DOCS=OFF",
+     ], src_root)
+     run(["cmake", "--build", str(odir / "build"), "-j1"], src_root)
+@@ -988,7 +995,7 @@ def build_mingw_ogg_vorbis(work: Path) -> Path:
+         if not va.is_file():
+             print(f"Downloading libvorbis {vver}…", flush=True)
+             urllib.request.urlretrieve(
+-                f"https://downloads.xiph.org/releases/vorbis/libvorbis-{vver}.tar.gz", va
++                f"https://github.com/xiph/vorbis/releases/download/v{vver}/libvorbis-{vver}.tar.gz", va
+             )
+         with tarfile.open(va) as tf:
+             tf.extractall(src_root)
+@@ -1013,7 +1020,8 @@ def build_mingw_ogg_vorbis(work: Path) -> Path:
+             cmake_list.write_text(patched)
+             print(f"Patched {cmake_list.relative_to(vdir)} to drop .def sources", flush=True)
+     cross_vorbis = list(cross) + [
+-        "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,--export-all-symbols",
++        "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,--export-all-symbols -static-libgcc -static-libstdc++ -Wl,-Bstatic,-lwinpthread,-lssp,-Bdynamic",
++        "-DCMAKE_C_STANDARD_LIBRARIES="+winhost.static_runtime(),
+     ]
+     run([
+         "cmake", "-S", str(vdir), "-B", str(vdir / "build"),
+@@ -1021,6 +1029,7 @@ def build_mingw_ogg_vorbis(work: Path) -> Path:
+         f"-DCMAKE_INSTALL_PREFIX={prefix_dir}",
+         f"-DCMAKE_PREFIX_PATH={prefix_dir}",
+         "-DCMAKE_BUILD_TYPE=Release",
++        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+         "-DBUILD_SHARED_LIBS=ON",
+         "-DCMAKE_SHARED_LIBRARY_PREFIX=",
+     ], src_root)
+@@ -1101,10 +1110,12 @@ def fetch_sdl2_mingw(work: Path) -> Path:
+     return tree
+ 
+ def build_windows(release: bool, rebuild: bool = False) -> Path:
+-    require_tool('cmake')
+-    prefix = 'x86_64-w64-mingw32-'
++    winhost.ensure_toolchain()
++    winhost.tool('cmake')
++    winhost.ensure_toolchain()
++    prefix = winhost.prefix()
+     for tool in ('gcc', 'g++', 'ld', 'strip', 'ar'):
+-        if shutil.which(prefix + tool) is None:
++        if shutil.which(prefix + tool) is None and shutil.which(tool) is None:
+             raise FileNotFoundError(f'Missing {prefix}{tool}; install mingw-w64.')
+     work = desktop_directory(ROOT, 'windows', release)
+     libraries, units = (work / name for name in ('bin', 'units'))
+@@ -1137,9 +1148,13 @@ def build_windows(release: bool, rebuild: bool = False) -> Path:
+     link_dir.mkdir(parents=True, exist_ok=True)
+     if zlib_a.is_file():
+         shutil.copy2(zlib_a, link_dir / "libz.a")
++    native_dir = work / "native"
++    if native_dir.exists():
++        shutil.rmtree(native_dir)
+     native = build_okgf(work, release,
+-        '-DCMAKE_SYSTEM_NAME=Windows', '-DCMAKE_SYSTEM_PROCESSOR=x86_64', f'-DCMAKE_C_COMPILER={mingw_gcc}',
+-        f'-DCMAKE_RC_COMPILER={windres}', f'-DCMAKE_PREFIX_PATH={deps}',
++        *((['-DCMAKE_SYSTEM_NAME=Windows', '-DCMAKE_SYSTEM_PROCESSOR=x86_64'] if winhost.prefix() else [])),
++        f'-DCMAKE_C_COMPILER={mingw_gcc}',
++        f'-DCMAKE_RC_COMPILER={winhost.rc_compiler()}', f'-DCMAKE_PREFIX_PATH={deps}',
+         f'-DCMAKE_FIND_ROOT_PATH={deps}',
+         '-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER',
+         '-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH',
+@@ -1151,7 +1166,9 @@ def build_windows(release: bool, rebuild: bool = False) -> Path:
+         *([f'-DPNG_LIBRARY={png_a}', f'-DPNG_PNG_INCLUDE_DIR={deps / "include"}'] if png_a else []),
+         *([f'-DJPEG_LIBRARY={jpeg_a}', f'-DJPEG_INCLUDE_DIR={deps / "include"}'] if jpeg_a else []),
+         '-DCMAKE_C_FLAGS=-Wno-error -Wno-pedantic',
+-        f'-DCMAKE_SHARED_LINKER_FLAGS=-static-libgcc -L{link_dir} -lz',
++        '-DCMAKE_SHARED_LINKER_FLAGS=-L'+winhost.static_pthread_dir()+' -static-libgcc -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic -L'+str(link_dir)+' -lz',
++        '-DWINPTHREAD_STATIC='+winhost.static_runtime(),
++        '-DCMAKE_C_STANDARD_LIBRARIES='+winhost.static_runtime(),
+         rebuild=rebuild)
+     dll_candidates = list(native.rglob('okgf.dll')) + list(native.rglob('libokgf.dll'))
+     if not dll_candidates:
+@@ -1220,6 +1237,9 @@ def build_windows(release: bool, rebuild: bool = False) -> Path:
+         f'-k"-L{libraries}"', f'-k"-L{implib}"', f'-k"-L{sdl_lib}"', '-k-lokgf', '-k-lSDL2',
+         '-k-lvorbisfile', '-k-lvorbis', '-k-logg',
+         '-k-static-libgcc',
++        '-k-static-libstdc++',
++        '-k-Wl,-Bstatic,-lwinpthread,-lssp,-Bdynamic',
++        '-k'+winhost.static_runtime(),
+         '-k-lws2_32', '-k-lwinmm', '-k-limm32', '-k-lversion', '-k-lole32', '-k-loleaut32',
+         '-k-lgdi32', '-k-luser32', '-k-lkernel32', '-k-lshell32', '-k-ladvapi32',
+         f'-o{exe}', ROOT / 'source/Rangers.dpr']
+@@ -1418,9 +1438,10 @@ def main() -> None:
+     if args.static and args.target != "linux":
+         parser.error("--static is currently implemented only for Linux.")
+     try:
+-        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+-        desired = 4096 if hard == resource.RLIM_INFINITY else min(4096, hard)
+-        resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, desired), hard))
++        if resource is not None:
++            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
++            desired = 4096 if hard == resource.RLIM_INFINITY else min(4096, hard)
++            resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, desired), hard))
+         if args.target == "android":
+             artifact = build_android(args.release, args.rebuild)
+         elif args.target == "windows":
+diff --git a/tools/compiler.py b/tools/compiler.py
+--- a/tools/compiler.py
++++ b/tools/compiler.py
+@@ -156,6 +156,35 @@ def prepare_compiler(
+     ]  # fmt: skip
+ 
+ 
++
++def bootstrap_vendored_win64(run_step, make: str) -> Path:
++    """Build vendored ppcrossx64 once. ppc386.exe is only the 3.2.2 bootstrap."""
++    import winhost
++    work = WORK / "x86_64-win64"
++    source = work / "compiler-src"
++    stamp = work / "compiler.stamp"
++    revision = source_revision()
++    ready = [source / "compiler" / name for name in ("ppcrossx64.exe", "ppcx64.exe")]
++    if any(path.is_file() for path in ready) and matches(stamp, revision):
++        return next(path for path in ready if path.is_file())
++    bootstrap = winhost.bootstrap_fpc()
++    stamp.unlink(missing_ok=True)
++    if source.exists():
++        shutil.rmtree(source)
++    shutil.copytree(VENDOR, source, ignore=shutil.ignore_patterns(".git", "units"))
++    run_step(work, "compiler", [
++        make, "-C", str(source), "compiler_cycle", "NOWPOCYCLE=1",
++        f"PP={bootstrap}", "OPT=-O2",
++        "CPU_TARGET=x86_64", "OS_TARGET=win64",
++        "BASEDIR="+(source/"compiler").as_posix(),
++    ])
++    stamp.write_text(revision)
++    for path in ready:
++        if path.is_file():
++            return path
++    raise FileNotFoundError(f"Vendored win64 compiler was not produced under {source / 'compiler'}")
++
++
+ def prepare_windows_cross(run_step) -> tuple[Path, list[str], Path]:
+     """Vendored FPC host compiler + matching win64 RTL (MinGW-w64 binutils).
+ 
+@@ -163,20 +192,29 @@ def prepare_windows_cross(run_step) -> tuple[Path, list[str], Path]:
+     (fcl-base, fcl-registry, …) match the compiler version. No system FPC
+     3.2.2 / compatibility shims.
+     """
+-    # Native Linux code generator from the vendored tree (no LLVM required).
+-    host_compiler, _host_flags = prepare_compiler("linux", run_step, llvm=False, lto=False)
+-    make = shutil.which("gmake") or shutil.which("make")
+-    if make is None:
+-        raise FileNotFoundError("Install GNU Make to build the win64 runtime.")
+-    prefix = "x86_64-w64-mingw32-"
++    import os
++    import winhost
++    if os.name == "nt":
++        winhost.ensure_toolchain()
++        make = str(winhost.make())
++        prefix = winhost.prefix()
++        host_compiler = bootstrap_vendored_win64(run_step, make)
++    else:
++        host_compiler, _host_flags = prepare_compiler("linux", run_step, llvm=False, lto=False)
++        make = shutil.which("gmake") or shutil.which("make")
++        if make is None:
++            raise FileNotFoundError("Install GNU Make to build the win64 runtime.")
++        prefix = "x86_64-w64-mingw32-"
+     for tool in ("gcc", "ld", "as", "ar", "strip"):
+-        if shutil.which(prefix + tool) is None:
++        if shutil.which(prefix + tool) is None and shutil.which(tool) is None:
+             raise FileNotFoundError(
+                 f"Missing {prefix}{tool}; install mingw-w64 (gcc-mingw-w64-x86-64)."
+             )
+-    cross_bin = Path(shutil.which(prefix + "ld")).parent
+-    host_cpu = linux_cpu()
++    cross_bin = Path(shutil.which(prefix + "ld") or shutil.which("ld")).parent
++    host_cpu = "x86_64" if os.name == "nt" else linux_cpu()
+     source = WORK / f"{host_cpu}-linux" / "source"
++    if not (source / "rtl").is_dir():
++        source = VENDOR
+     if not (source / "rtl").is_dir():
+         raise FileNotFoundError(f"Expected vendored compiler tree at {source}")
+     work = WORK / "x86_64-win64"
+@@ -205,7 +243,10 @@ def prepare_windows_cross(run_step) -> tuple[Path, list[str], Path]:
+             dest = runtime_source / name
+             if not dest.exists():
+                 link = source / name if (source / name).exists() else VENDOR / name
+-                dest.symlink_to(link, target_is_directory=True)
++                if os.name == "nt":
++                    shutil.copytree(link, dest)
++                else:
++                    dest.symlink_to(link, target_is_directory=True)
+         units.mkdir(parents=True, exist_ok=True)
+         run_step(runtime, "runtime", [
+             make, "-C", runtime_source / "rtl", "all", *target_flags,
+diff --git a/tools/winhost.py b/tools/winhost.py
+new file mode 100644
+--- /dev/null
++++ b/tools/winhost.py
+@@ -0,0 +1,172 @@
++"""Windows host tools. FPC 3.2.2 is only the bootstrap."""
++
++from __future__ import annotations
++
++import hashlib
++import os
++import shutil
++import subprocess
++import zipfile
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++HOST = ROOT / ".local" / "windows-host"
++
++WINLIBS_URL = (
++    "https://github.com/brechtsanders/winlibs_mingw/releases/download/"
++    "16.2.0posix-14.0.0-ucrt-r2/"
++    "winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r2.zip"
++)
++WINLIBS_SHA256 = "d5dbafc4a170e762ca6143151ec918fb9e2c72736fb14cd704abebc6bdd5276a"
++FPC_URL = "https://downloads.freepascal.org/fpc/dist/3.2.2/i386-win32/fpc-3.2.2.win32.and.win64.exe"
++FPC_SHA256 = "8c255390544b051388b577eb61c6191a04883264afe0e3369b3600a56daf7bde"
++
++
++def native() -> bool:
++    return os.name == "nt"
++
++
++def _digest(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def _fetch(url: str, dest: Path, expected: str) -> None:
++    import urllib.request
++
++    if dest.is_file() and _digest(dest) == expected:
++        return
++    dest.parent.mkdir(parents=True, exist_ok=True)
++    if dest.is_file():
++        dest.unlink()
++    print(f"Downloading {url}…", flush=True)
++    urllib.request.urlretrieve(url, dest)
++    got = _digest(dest)
++    if got != expected:
++        dest.unlink()
++        raise RuntimeError(f"SHA256 mismatch for {url}: got {got}, expected {expected}")
++
++
++def _which(name: str) -> Path | None:
++    found = shutil.which(name)
++    return Path(found).resolve() if found else None
++
++
++def _prepend(bin_dir: Path) -> None:
++    if bin_dir.is_dir():
++        os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
++
++
++def _winlibs_bin() -> Path | None:
++    hits = list(HOST.glob("winlibs/**/gcc.exe"))
++    return hits[0].parent if hits else None
++
++
++def prefix() -> str:
++    if _which("x86_64-w64-mingw32-gcc"):
++        return "x86_64-w64-mingw32-"
++    return ""
++
++
++
++def _existing_ppc386() -> Path | None:
++    found = _which("ppc386")
++    if found is not None:
++        return found
++    for root in (HOST / "fpc", Path("C:/FPC")):
++        if root.exists():
++            hits = list(root.rglob("ppc386.exe"))
++            if hits:
++                return hits[0]
++    return None
++
++
++def ensure_toolchain() -> None:
++    if not native():
++        return
++    if not (_which("gcc") and _which("cmake") and _which("windres")):
++        archive = HOST / "winlibs.zip"
++        _fetch(WINLIBS_URL, archive, WINLIBS_SHA256)
++        if not _winlibs_bin():
++            print("Extracting WinLibs…", flush=True)
++            with zipfile.ZipFile(archive) as zf:
++                zf.extractall(HOST / "winlibs")
++    winlibs = _winlibs_bin()
++    if winlibs is not None:
++        _prepend(winlibs)
++    found = _existing_ppc386()
++    if found is not None:
++        _prepend(found.parent)
++        return
++    installer = HOST / "fpc-3.2.2.win32.and.win64.exe"
++    _fetch(FPC_URL, installer, FPC_SHA256)
++    dest = HOST / "fpc"
++    dest.mkdir(parents=True, exist_ok=True)
++    print(f"Installing FPC 3.2.2 bootstrap into {dest}…", flush=True)
++    subprocess.run(
++        [str(installer), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", f"/DIR={dest}"],
++        check=True,
++    )
++    found = _existing_ppc386()
++    if found is None:
++        raise FileNotFoundError("FPC bootstrap did not install ppc386.exe")
++    _prepend(found.parent)
++    if winlibs is not None:
++        _prepend(winlibs)
++
++
++def tool(name: str) -> Path:
++    ensure_toolchain()
++    found = _which(prefix() + name) or _which(name)
++    if found is None:
++        raise FileNotFoundError(f"Required tool not found: {prefix()}{name}")
++    return found
++
++
++
++def static_runtime() -> str:
++    gcc = tool("gcc")
++    roots = [gcc.parent, gcc.parent.parent, gcc.parent.parent / "x86_64-w64-mingw32"]
++    for root in roots:
++        hits = list(root.rglob("libwinpthread.a"))
++        if hits:
++            return hits[0].as_posix()
++    raise FileNotFoundError("libwinpthread.a was not found next to the MinGW toolchain")
++
++
++def static_pthread_dir() -> str:
++    archive = Path(static_runtime())
++    dest = HOST / "static-pthread"
++    dest.mkdir(parents=True, exist_ok=True)
++    for name in ("libwinpthread.a", "libpthread.a", "libwinpthread.dll.a", "libpthread.dll.a"):
++        target = dest / name
++        if not target.is_file() or target.stat().st_size != archive.stat().st_size:
++            shutil.copy2(archive, target)
++    return dest.as_posix()
++
++
++def rc_compiler() -> str:
++    path = tool("gcc").parent / "windres.exe"
++    if not path.is_file():
++        path = tool("windres")
++    return Path(path).as_posix()
++
++
++def bootstrap_fpc() -> Path:
++    ensure_toolchain()
++    for root in (Path("C:/FPC/3.2.2"), HOST / "fpc"):
++        if root.exists():
++            hits = list(root.rglob("ppc386.exe"))
++            if hits:
++                return hits[0]
++    found = _which("ppc386")
++    if found is None:
++        raise FileNotFoundError("ppc386.exe bootstrap compiler was not found")
++    return found
++
++
++def make() -> Path:
++    ensure_toolchain()
++    found = _which("mingw32-make") or _which("gmake") or _which("make")
++    if found is None:
++        raise FileNotFoundError("GNU Make was not found")
++    return found

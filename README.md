@@ -1,8 +1,12 @@
 # What is this?
 
-This repo provides support for Windows target, as well as QoL fixes to both Linux and Windows target to the [reverse-engineered version of Space Rangers HD](//github.com/pakompom/SpaceRangersHD_FPC) written in FreePascal.
+This repo contains patches that enhance [reverse-engineered version of Space Rangers HD](//github.com/pakompom/SpaceRangersHD_FPC) written in FreePascal, and provide the following features missing from the upstream:
 
-Upstream repo can produce binaries only for MacOS and Linux. This patch series rectifies that.
+- Windows target and host support: cross-build on any modern Linux or Windows 7 through 11
+- Fixes to both Linux and Windows targets: robust build system, proper SDL integration, critical bug fixes
+- Semi-static and semi-portable Linux target (WIP)
+
+**NB: upstream repo also announces support for macOS targets.** I do not have any Mac computer in my posession, so I cannot verify that my changes did not break the target. If they are, and you can verifiably fix this, open a pull request. **Until then, consider that this repo DOES NOT support macOS.**
 
 Patches can be applied against [5f491a841cbd11d2a9a6861a822a08ffa64d15f2](https://github.com/pakompom/SpaceRangersHD_FPC/tree/5f491a841cbd11d2a9a6861a822a08ffa64d15f2) of the upstream.
 
@@ -15,21 +19,25 @@ Those are located at `vendor/` of the upstream repo.
 
 # Work in progress?
 
-You bet. I cobbled this together while on vacation, so I barely tested the build. I have fixed all of the crashes I've encountered immediately, but I'm certain that there's a lot of them still lurking beneath.
+You bet. I began working on this during my vacation, and these changes have very limited testing. I have fixed all of the crashes I've encountered immediately, but I'm certain that there's a lot of them still lurking beneath.
 
-With that said, binaries were confirmed to launch on Windows 10 and 11, Linux Mint 22.1 Xia, Debian Trixie and SteamOS 3.8.28.
+With that said, binaries were confirmed to launch on Windows 7 (with caveats), 10 and 11, Linux Mint 22.1 Xia, Debian Trixie and SteamOS 3.8.28.
 
 # But upstream supports Linux now, doesn't it? Maybe it will support Windows?
 
-Maybe, maybe not. In any case, Linux target of the upstream looks untested and contains several serious issues with SDL.
+Maybe, maybe not. In any case, it does not right now, and Linux target of the upstream looks untested and contains several serious issues with SDL.
 
-I had some extra time, so I decided to patch stuff up.
+Bottom line: I had some extra time, so I decided to patch stuff up.
 
 # What has been fixed?
 
+<<<<<<< HEAD
 Apart from build system - mainly SDL integration.
 
 Now we have DPI awareness, proper windowed mode support, integer scaling support, pillar-boxed non-integer scaling, (mostly) proper pointer clamping across all modes, and so on and so on.
+=======
+Apart from build system - mainly SDL integration. Now we have DPI awareness, proper windowed mode support, integer scaling support, pillar-boxed non-integer scaling, (mostly) pointer clamping across all modes, and so on and so on.
+>>>>>>> f27d159 (Support for building on Windows, new build documentation, relicense under MIT)
 
 I have also fixed a couple of crashes that upstream is yet to fix, and added a bit of polish so Steam Deck trackpads would work properly too.
 
@@ -37,20 +45,23 @@ No gameplay or balance changes.
 
 # Cross-platform support details?
 
-Linux and Windows binaries can be built on any modern Ubuntu (24.04+), Linux Mint (22.1 Xia) or Debian (Trixie). You cannot build this on Windows yet.
+Linux and Windows binaries can be built on any modern Ubuntu (24.04+), Linux Mint (22.1 Xia) or Debian (Trixie).
 
-Linux binaries are produced natively, Windows build uses mingw64 to cross-compile. The latter requires an active internet connection to build, sorry for that.
+Additionally, you can also build this on Windows, but only for Windows target. Right now you cannot build Linux target on Windows host.
+
+Linux binaries are produced natively, Windows build - regardless of the host OS - uses mingw64 to cross-compile.
 
 By default, Linux builds use vendored fpc fork, but you can also build them with the system one.
 
 I see no reason why this won't build on any other recent Linux, but you'll have to adapt dependencies from below to your distro by yourself. For instance, on Arch or CachyOS you might need to install mingw64 from AUR or extra repos.
 
-NB: macOS builds are untested and unverified. I have no hardware to run them on, nor the desire to debug the build. I'm sure that I broke a lot of Mac stuff on the way, so if anyone wants to test that and/or ship some fixes - feel free to open a pull request.
+**NB:** macOS builds are untested and unverified. I have no hardware to run them on, nor the desire to debug the build. I'm sure that I broke a lot of Mac stuff on the way, so if anyone wants to test that and/or ship some fixes - feel free to open a pull request.
 
-# How to apply patch and build?
+# How to apply patches and build binaries?
 
-- Install dependencies
+This section has gotten way too big and was moved to a separate document, see [BUILD](docs/BUILD.md).
 
+<<<<<<< HEAD
 Ubuntu 24.04 & Linux Mint Xia: 
 
 ```
@@ -95,13 +106,11 @@ Now you can try to build binaries:
 - For Windows: `./tools/build.py --target windows --release`
 
 **NB:** an active internet connection is **REQUIRED** for Windows builds to complete, as mingw will download required dependencies. First build might take a while.
+=======
+**NB:** an active internet connection is **REQUIRED** for Windows target builds to complete, as mingw will live-download required dependencies. First build might take a while.
+>>>>>>> f27d159 (Support for building on Windows, new build documentation, relicense under MIT)
 
 **NB:** LTO builds are broken as of now, and static builds are still WIP and largely untested due to their low priority.
-
-If everything compiled OK, binaries will be at:
-
-- Linux: `SpaceRangersHD_FPC/.local/linux-x86_64/release/bin`
-- Windows: `SpaceRangersHD_FPC/.local/windows-x86_64/release/bin`
 
 Be advised that if you build the binaries with a vendored fpc fork, it has to be compiled itself. This requires 4+ gigs of RAM on your build machine, for Linux and Windows alike.
 
@@ -119,17 +128,29 @@ The same will work on any Linux, just adapt the path to the directory containing
 
 - Windows: just double-click `Rangers.exe` and wait for the game to start.
 
+# AI involvement?
+
+This project began as a monolithic, single-file 100 KB patch - because I naively thought that this would be a funny vacation one-off project I won't have to support. 
+
+Of course, this turned out to be a false thought, so I used self-hosted Qwen3.8 Flash to split the patch into a series of smaller ones. The split was then manually reviewed by me.
+
+The same model along with Codex was also used to run target builds tests and verify their status.
+
+Otherwise, pretty much all of the original shitty Pascal and Python code this project brings is written by a meatbag. 
+
 # License?
 
-License is [WTFPL](LICENSE).
+License is [MIT](LICENSE).
 
-The WTFPL license applies only to original material contained in this repository (meaning, code I wrote).
+This project was previously licensed as WTFPL, but since then I have gotten some legal advice regarding how to better release my changes. Apologies for that, but in my opinion, this really changes nothing for anyone's freedom to use this code however they want.
+
+**PLEASE NOTE: the MIT license applies only to original material contained in this repository (meaning, the code I wrote).**
 
 It does not grant rights in the upstream project, its dependencies or in Space Rangers HD. You agree to bear all of the legal risks originating from cloning the upstream and buiding the binaries.
 
 This repository contains only a patch authored for Linux and Windows compatibility and some quality of life fixes. It does not contain the upstream project, ready-to-use binaries or game data. Users must independently obtain source code from the upstream project and a lawfully purchased copy of the game. I do not condone software piracy, so if you stole the game from some shady place on the internet, that's on you.
 
-PLEASE NOTE: this patch is not affiliated with or endorsed by game's developers or its publisher. This is a hobby project.
+**PLEASE NOTE: this patch series is not sanctioned, endorsed or otherwise "approved" by game's developer (СНК-Games) or its publisher (1C-Softclub / Fulqrum Publishing). This is a hobby project aimed at preserving the game playable on current hardware and software.**
 
 # Boring warranty disclaimer?
 
@@ -142,7 +163,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
-
 # Acknowledgements?
 
 Upstream:

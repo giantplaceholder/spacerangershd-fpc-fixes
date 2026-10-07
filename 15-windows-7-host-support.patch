@@ -1,0 +1,607 @@
+diff --git a/BUILDING.md b/BUILDING.md
+index 370a821..04af3b0 100644
+--- a/BUILDING.md
++++ b/BUILDING.md
+@@ -12,6 +12,23 @@ libraries for SDL2 2.26+ (or SDL2-compat), libogg, libvorbis, libjpeg, and libpn
+ - Windows: mingw-w64; host bootstraps vendored FPC and builds it locally, as with Linux by default. Requires quite a lot of memory (4+ gigs of RAM at minimum)
+ - macOS: Xcode command-line tools and Homebrew (untested with this fork)
+ 
++On a Windows host the build provisions its own WinLibs under
++`.local/windows-host/winlibs/` and takes every tool from that one directory,
++never from `PATH`, so an unrelated MSYS2 or Visual Studio install cannot be
++mixed into a configure. A tree left by an older pin is replaced on next run.
++
++WinLibs is pinned to gcc 13.1.0 (POSIX threads) / mingw-w64 11.0.0 msvcrt r1,
++which bundles CMake 3.26.3 and Ninja 1.11.1: the newest release whose tools
++still start on Windows 7 SP1. CMake below 3.29 does not normalise separators in
++`-D` cache entries, so all paths handed to CMake use forward slashes; a
++backslash reaches `CMakeCCompiler.cmake` verbatim and fails the configure with
++`Invalid character escape`.
++
++That CMake asks Ninja for its version before every `try_compile`, so one launch
++that answers nothing stops a dependency configure; such a configure is retried
++while it keeps making progress. `SRHD_WINDOWS_GENERATOR=make` switches to the
++makefile generator, which is never probed.
++
+ AVI playback needs Xvid: `libxvidcore.so.4` on Linux and `xvidcore` on macOS.
+ `FPC_BOOTSTRAP` overrides the installed compiler used to bootstrap the pinned FPC.
+ 
+diff --git a/tools/build.py b/tools/build.py
+index 77d2a3a..076db70 100755
+--- a/tools/build.py
++++ b/tools/build.py
+@@ -15,6 +15,7 @@ import shlex
+ import shutil
+ import subprocess
+ import struct
++import time
+ import zipfile
+ from pathlib import Path
+ 
+@@ -51,22 +52,77 @@ def output(*command: str) -> str:
+     return subprocess.check_output(command, text=True, stderr=subprocess.STDOUT).strip()
+ 
+ 
++def configure_log_path(argv, cwd) -> Path:
++    """Keep a configure transcript beside the tree being configured."""
++    for index, argument in enumerate(argv):
++        if argument == "-B" and index + 1 < len(argv):
++            return Path(argv[index + 1]) / "configure.log"
++    return Path(cwd or Path.cwd()) / "cmake-run.log"
++
++
++def run_checked(command, cwd=None, log=None, echo=True) -> None:
++    """Run a CMake command, retrying a configure that a blank tool version aborted.
++
++    CMake caches completed checks, so each attempt gets further; retry only while
++    it does. A real compile or link error fails at once.
++    """
++    argv = winhost.cmake_command(command)
++    configure = winhost.is_configure(argv)
++    if not configure and log is None:
++        subprocess.run(argv, cwd=cwd, check=True)  # nothing to retry
++        return
++    destination = Path(log) if log is not None else configure_log_path(argv, cwd)
++    attempts = winhost.CONFIGURE_ATTEMPTS if configure else 1
++    status = 0
++    previous = -1
++    for attempt in range(attempts):
++        destination.parent.mkdir(parents=True, exist_ok=True)
++        with destination.open("w") as stream:
++            process = subprocess.Popen(
++                argv,
++                cwd=cwd,
++                stdout=subprocess.PIPE,
++                stderr=subprocess.STDOUT,
++                text=True,
++                errors="replace",
++            )
++            collected = []
++            for line in process.stdout:
++                if echo:
++                    print(line, end="", flush=True)
++                stream.write(line)
++                stream.flush()
++                collected.append(line)
++            status = process.wait()
++        if status == 0:
++            return
++        text = "".join(collected)
++        if not configure or not winhost.empty_build_tool_probe(text):
++            raise subprocess.CalledProcessError(status, argv)
++        reached = winhost.configure_progress(text)
++        if reached <= previous:  # no cached progress gained
++            print(f"Configure made no further progress ({reached} checks)", flush=True)
++            break
++        previous = reached
++        print(
++            f"Build tool probe returned no version, retrying configure "
++            f"(attempt {attempt + 2}, {reached} checks completed)",
++            flush=True,
++        )
++        time.sleep(min(2 * (attempt + 1), 10))
++        winhost.warm_up(force=True)
++    raise subprocess.CalledProcessError(status, argv)
++
++
+ def run_step(work: Path, name: str, command: list[str | Path]) -> None:
+     """Keep each build step's output beside its generated files."""
+     log = work / f"{name}.log"
+     print(f"Building {name}…", flush=True)
+-    with log.open("w") as stream:
+-        try:
+-            subprocess.run(
+-                [str(arg) for arg in command],
+-                cwd=work,
+-                stdout=stream,
+-                stderr=subprocess.STDOUT,
+-                check=True,
+-            )
+-        except subprocess.CalledProcessError as error:
+-            print("\n".join(log.read_text(errors="replace").splitlines()[-30:]))
+-            raise RuntimeError(f"{name} failed; see {log}") from error
++    try:
++        run_checked(command, cwd=work, log=log, echo=False)
++    except subprocess.CalledProcessError:
++        print("\n".join(log.read_text(errors="replace").splitlines()[-30:]))
++        raise RuntimeError(f"{name} failed; see {log}") from None
+ 
+ 
+ def command_signature(command: list[str | Path]) -> str:
+@@ -137,7 +193,9 @@ def build_okgf(work: Path, release: bool, *options: str, rebuild: bool = False)
+     directory = work / "native"
+     configuration = "Release" if release else "RelWithDebInfo"
+     run_step(work, "configure", [
+-        "cmake", "-S", ROOT / "native", "-B", directory, f"-DCMAKE_BUILD_TYPE={configuration}",
++        winhost.cmake_program(),
++        *winhost.cmake_generator_args(directory),
++        "-S", ROOT / "native", "-B", directory, f"-DCMAKE_BUILD_TYPE={configuration}",
+         *options,
+     ])  # fmt: skip
+     run_step(
+@@ -811,12 +869,13 @@ def build_linux_pic_image_deps(work: Path) -> Path:
+     src_root.mkdir(parents=True, exist_ok=True)
+ 
+     def run(cmd):
+-        subprocess.run([str(c) for c in cmd], check=True)
++        run_checked(cmd)
+ 
+     def cmake_build(src: Path, extra: list[str]):
+         build = src / "build-pic"
+         run([
+-            "cmake", "-S", src, "-B", build,
++            winhost.cmake_program(), *winhost.cmake_generator_args(build),
++            "-S", src, "-B", build,
+             f"-DCMAKE_INSTALL_PREFIX={prefix_dir}",
+             "-DCMAKE_BUILD_TYPE=Release",
+             "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+@@ -879,7 +938,7 @@ def build_mingw_image_deps(work: Path) -> Path:
+     src_root = mingw_safe_dir(work) / 'mingw-deps-src'
+     src_root.mkdir(parents=True, exist_ok=True)
+     def run(cmd, cwd):
+-        subprocess.run([str(c) for c in cmd], cwd=cwd, check=True)
++        run_checked(cmd, cwd=cwd)
+     zver = '1.3.1'
+     zdir = src_root / f'zlib-{zver}'
+     if not zdir.is_dir():
+@@ -888,7 +947,7 @@ def build_mingw_image_deps(work: Path) -> Path:
+             print(f'Downloading zlib {zver}…', flush=True)
+             urllib.request.urlretrieve(f'https://github.com/madler/zlib/releases/download/v{zver}/zlib-{zver}.tar.gz', za)
+         with tarfile.open(za) as tf: tf.extractall(src_root)
+-    run(['cmake','-S',str(zdir),'-B',str(zdir/'build'),*((['-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64']) if winhost.prefix() else []),f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={winhost.tool("g++")}',f'-DCMAKE_RC_COMPILER={winhost.rc_compiler()}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DBUILD_SHARED_LIBS=OFF'], src_root)
++    run([winhost.cmake_program(),*winhost.cmake_generator_args(zdir/'build'),'-S',str(zdir),'-B',str(zdir/'build'),*((['-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64']) if winhost.prefix() else []),f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={winhost.tool("g++")}',f'-DCMAKE_RC_COMPILER={winhost.rc_compiler()}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DBUILD_SHARED_LIBS=OFF'], src_root)
+     run(['cmake','--build',str(zdir/'build'),'-j1'], src_root)
+     run(['cmake','--install',str(zdir/'build')], src_root)
+     for leftover in list(prefix_dir.rglob('zlib*.dll')) + list(prefix_dir.rglob('libzlib*.dll')) + list(prefix_dir.rglob('libz.dll')):
+@@ -902,7 +961,7 @@ def build_mingw_image_deps(work: Path) -> Path:
+             print(f'Downloading libpng {pver}…', flush=True)
+             urllib.request.urlretrieve(f'https://download.sourceforge.net/libpng/libpng-{pver}.tar.gz', pa)
+         with tarfile.open(pa) as tf: tf.extractall(src_root)
+-    run(['cmake','-S',str(pdir),'-B',str(pdir/'build'),*((['-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64']) if winhost.prefix() else []),f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={winhost.tool("g++")}',f'-DCMAKE_RC_COMPILER={winhost.rc_compiler()}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}',f'-DCMAKE_PREFIX_PATH={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DPNG_SHARED=OFF','-DPNG_STATIC=ON','-DPNG_TESTS=OFF','-DBUILD_SHARED_LIBS=OFF'], src_root)
++    run([winhost.cmake_program(),*winhost.cmake_generator_args(pdir/'build'),'-S',str(pdir),'-B',str(pdir/'build'),*((['-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64']) if winhost.prefix() else []),f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={winhost.tool("g++")}',f'-DCMAKE_RC_COMPILER={winhost.rc_compiler()}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}',f'-DCMAKE_PREFIX_PATH={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DPNG_SHARED=OFF','-DPNG_STATIC=ON','-DPNG_TESTS=OFF','-DBUILD_SHARED_LIBS=OFF'], src_root)
+     run(['cmake','--build',str(pdir/'build'),'-j1'], src_root)
+     run(['cmake','--install',str(pdir/'build')], src_root)
+     jver = '3.0.3'
+@@ -913,7 +972,7 @@ def build_mingw_image_deps(work: Path) -> Path:
+             print(f'Downloading libjpeg-turbo {jver}…', flush=True)
+             urllib.request.urlretrieve(f'https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/{jver}/libjpeg-turbo-{jver}.tar.gz', ja)
+         with tarfile.open(ja) as tf: tf.extractall(src_root)
+-    run(['cmake','-S',str(jdir),'-B',str(jdir/'build'),*((['-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64']) if winhost.prefix() else []),f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={winhost.tool("g++")}',f'-DCMAKE_RC_COMPILER={winhost.rc_compiler()}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DENABLE_SHARED=OFF','-DENABLE_STATIC=ON','-DBUILD_SHARED_LIBS=OFF'], src_root)
++    run([winhost.cmake_program(),*winhost.cmake_generator_args(jdir/'build'),'-S',str(jdir),'-B',str(jdir/'build'),*((['-DCMAKE_SYSTEM_NAME=Windows','-DCMAKE_SYSTEM_PROCESSOR=x86_64']) if winhost.prefix() else []),f'-DCMAKE_C_COMPILER={gcc}',f'-DCMAKE_CXX_COMPILER={winhost.tool("g++")}',f'-DCMAKE_RC_COMPILER={winhost.rc_compiler()}','-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY',f'-DCMAKE_INSTALL_PREFIX={prefix_dir}','-DCMAKE_BUILD_TYPE=Release','-DENABLE_SHARED=OFF','-DENABLE_STATIC=ON','-DBUILD_SHARED_LIBS=OFF'], src_root)
+     run(['cmake','--build',str(jdir/'build'),'-j1'], src_root)
+     run(['cmake','--install',str(jdir/'build')], src_root)
+     for leftover in prefix_dir.rglob('*.dll'):
+@@ -948,7 +1007,7 @@ def build_mingw_ogg_vorbis(work: Path) -> Path:
+     lib_dir.mkdir(parents=True, exist_ok=True)
+ 
+     def run(cmd, cwd):
+-        subprocess.run([str(c) for c in cmd], cwd=cwd, check=True)
++        run_checked(cmd, cwd=cwd)
+ 
+     # libogg
+     over = "1.3.5"
+@@ -973,7 +1032,9 @@ def build_mingw_ogg_vorbis(work: Path) -> Path:
+         "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
+     ]
+     run([
+-        "cmake", "-S", str(odir), "-B", str(odir / "build"),
++        winhost.cmake_program(),
++        *winhost.cmake_generator_args(odir / "build"),
++        "-S", str(odir), "-B", str(odir / "build"),
+         *cross,
+         f"-DCMAKE_INSTALL_PREFIX={prefix_dir}",
+         "-DCMAKE_BUILD_TYPE=Release",
+@@ -1024,7 +1085,9 @@ def build_mingw_ogg_vorbis(work: Path) -> Path:
+         "-DCMAKE_C_STANDARD_LIBRARIES="+winhost.static_runtime(),
+     ]
+     run([
+-        "cmake", "-S", str(vdir), "-B", str(vdir / "build"),
++        winhost.cmake_program(),
++        *winhost.cmake_generator_args(vdir / "build"),
++        "-S", str(vdir), "-B", str(vdir / "build"),
+         *cross_vorbis,
+         f"-DCMAKE_INSTALL_PREFIX={prefix_dir}",
+         f"-DCMAKE_PREFIX_PATH={prefix_dir}",
+@@ -1111,22 +1174,21 @@ def fetch_sdl2_mingw(work: Path) -> Path:
+ 
+ def build_windows(release: bool, rebuild: bool = False) -> Path:
+     winhost.ensure_toolchain()
+-    winhost.tool('cmake')
+-    winhost.ensure_toolchain()
++    winhost.cmake_program()
+     prefix = winhost.prefix()
+     for tool in ('gcc', 'g++', 'ld', 'strip', 'ar'):
+-        if shutil.which(prefix + tool) is None and shutil.which(tool) is None:
++        if winhost.find(tool) is None:
+             raise FileNotFoundError(f'Missing {prefix}{tool}; install mingw-w64.')
+     work = desktop_directory(ROOT, 'windows', release)
+     libraries, units = (work / name for name in ('bin', 'units'))
+     for directory in (libraries, units):
+         directory.mkdir(parents=True, exist_ok=True)
+-    mingw_gcc = Path(shutil.which(prefix + 'gcc'))
++    mingw_gcc = winhost.tool('gcc')
+     implib = work / 'lib'
+     implib.mkdir(parents=True, exist_ok=True)
+     deps = build_mingw_image_deps(work)
+     ov = build_mingw_ogg_vorbis(work)
+-    windres = shutil.which(prefix + 'windres') or str(mingw_gcc)
++    windres = str(winhost.find('windres') or mingw_gcc)
+     libdir = deps / 'lib'
+     def first_a(*names):
+         for n in names:
+@@ -1250,7 +1312,7 @@ def build_windows(release: bool, rebuild: bool = False) -> Path:
+     if not exe.is_file():
+         raise FileNotFoundError(f'Expected {exe}')
+     if release:
+-        strip = shutil.which(prefix + 'strip')
++        strip = winhost.find('strip')
+         if strip:
+             subprocess.run([strip, '--strip-unneeded', str(exe)], check=False)
+             so = libraries / 'okgf.dll'
+diff --git a/tools/compiler.py b/tools/compiler.py
+index fff088c..c36477c 100644
+--- a/tools/compiler.py
++++ b/tools/compiler.py
+@@ -206,11 +206,11 @@ def prepare_windows_cross(run_step) -> tuple[Path, list[str], Path]:
+             raise FileNotFoundError("Install GNU Make to build the win64 runtime.")
+         prefix = "x86_64-w64-mingw32-"
+     for tool in ("gcc", "ld", "as", "ar", "strip"):
+-        if shutil.which(prefix + tool) is None and shutil.which(tool) is None:
++        if winhost.find(tool) is None:
+             raise FileNotFoundError(
+                 f"Missing {prefix}{tool}; install mingw-w64 (gcc-mingw-w64-x86-64)."
+             )
+-    cross_bin = Path(shutil.which(prefix + "ld") or shutil.which("ld")).parent
++    cross_bin = winhost.find("ld").parent  # binutils must match the provisioning tree
+     host_cpu = "x86_64" if os.name == "nt" else linux_cpu()
+     source = WORK / f"{host_cpu}-linux" / "source"
+     if not (source / "rtl").is_dir():
+diff --git a/tools/winhost.py b/tools/winhost.py
+index 3fba4c7..4972166 100644
+--- a/tools/winhost.py
++++ b/tools/winhost.py
+@@ -6,22 +6,126 @@ import hashlib
+ import os
+ import shutil
+ import subprocess
++import time
+ import zipfile
+ from pathlib import Path
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ HOST = ROOT / ".local" / "windows-host"
+ 
++_warmed = False
++
+ WINLIBS_URL = (
+     "https://github.com/brechtsanders/winlibs_mingw/releases/download/"
+-    "16.2.0posix-14.0.0-ucrt-r2/"
+-    "winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r2.zip"
++    "13.1.0posix-16.0.3-11.0.0-msvcrt-r1/"
++    "winlibs-x86_64-posix-seh-gcc-13.1.0-mingw-w64msvcrt-11.0.0-r1.zip"
+ )
+-WINLIBS_SHA256 = "d5dbafc4a170e762ca6143151ec918fb9e2c72736fb14cd704abebc6bdd5276a"
++WINLIBS_SHA256 = "c72978a66effe78234f4ed0614ebb9e3b4d5f02749210b722d6cda1fbd1784a2"
+ FPC_URL = "https://downloads.freepascal.org/fpc/dist/3.2.2/i386-win32/fpc-3.2.2.win32.and.win64.exe"
+ FPC_SHA256 = "8c255390544b051388b577eb61c6191a04883264afe0e3369b3600a56daf7bde"
+ 
+ 
++def cmake_arg(value) -> str:
++    """CMake < 3.29 reads a backslash in a cache value as an escape; use slashes."""
++    return str(value).replace("\\", "/")
++
++
++def is_cmake(command) -> bool:
++    """Whether a command line runs CMake."""
++    if not len(command):
++        return False
++    program = str(command[0]).replace("\\", "/").rpartition("/")[2].lower()
++    return program in ("cmake", "cmake.exe")
++
++
++CONFIGURE_ATTEMPTS = 12
++
++
++def configure_progress(text: str) -> int:
++    """Count completed checks in a configure transcript."""
++    completed = 0
++    for line in text.splitlines():
++        stripped = line.strip()
++        if stripped.startswith("--") and any(
++            stripped.endswith(marker)
++            for marker in (" - done", " - found", " - failed", " - Success", " - Works")
++        ):
++            completed += 1
++    return completed
++
++
++def is_configure(argv) -> bool:
++    """Whether the command configures a tree, as opposed to --build/--install."""
++    argv = [str(argument) for argument in argv]
++    return is_cmake(argv) and "-S" in argv and "-B" in argv
++
++
++def _answered(program: Path) -> bool:
++    """Whether ``program --version`` produced output, without raising."""
++    try:
++        result = subprocess.run(
++            [str(program), "--version"],
++            capture_output=True,
++            text=True,
++            timeout=120,
++        )
++    except (OSError, subprocess.SubprocessError):
++        return False
++    return bool((result.stdout or "").strip())
++
++
++def warm_up(force: bool = False) -> None:
++    """Launch the tools once, so first-use launch failures are not paid by a configure."""
++    global _warmed
++    if not native() or (_warmed and not force):
++        return
++    _warmed = True
++    for name in ("cmake.exe", "ninja.exe", "mingw32-make.exe", "gcc.exe"):
++        program = _winlibs_tool(name)
++        if program is None:
++            continue
++        for attempt in range(3):
++            if _answered(program):
++                break
++            if attempt == 2:
++                print(f"Warning: {program} has not answered a version query yet", flush=True)
++            time.sleep(1)
++
++
++def empty_build_tool_probe(text: str) -> bool:
++    """Whether CMake reported a blank tool version, ie a launch that answered nothing."""
++    if not native() or not text:
++        return False
++    return (
++        "The detected version of Ninja ()" in text
++        or "The detected version of make ()" in text
++    )
++
++
++def cmake_command(command) -> list[str]:
++    """Stringify a command line, normalising the -D values and -S/-B that CMake caches."""
++    argv = [str(argument) for argument in command]
++    if not is_cmake(argv):
++        return argv
++    result = []
++    normalise_next = False
++    for index, argument in enumerate(argv):
++        if normalise_next:
++            result.append(cmake_arg(argument))
++            normalise_next = False
++            continue
++        if argument in ("-S", "-B") and index + 1 < len(argv):
++            result.append(argument)
++            normalise_next = True
++            continue
++        if argument.startswith("-D") and "=" in argument:
++            name, _, value = argument[2:].partition("=")
++            result.append("-D" + name + "=" + cmake_arg(value))
++            continue
++        result.append(argument)
++    return result
++
++
+ def native() -> bool:
+     return os.name == "nt"
+ 
+@@ -62,9 +166,8 @@ def _winlibs_bin() -> Path | None:
+ 
+ 
+ def prefix() -> str:
+-    if _which("x86_64-w64-mingw32-gcc"):
+-        return "x86_64-w64-mingw32-"
+-    return ""
++    """Cross-compile prefix, fixed rather than probed from PATH, which also gates cross flags."""
++    return "x86_64-w64-mingw32-"
+ 
+ 
+ 
+@@ -83,16 +186,12 @@ def _existing_ppc386() -> Path | None:
+ def ensure_toolchain() -> None:
+     if not native():
+         return
+-    if not (_which("gcc") and _which("cmake") and _which("windres")):
+-        archive = HOST / "winlibs.zip"
+-        _fetch(WINLIBS_URL, archive, WINLIBS_SHA256)
+-        if not _winlibs_bin():
+-            print("Extracting WinLibs…", flush=True)
+-            with zipfile.ZipFile(archive) as zf:
+-                zf.extractall(HOST / "winlibs")
++    # Provision unconditionally: PATH tools used to hide the absence of WinLibs.
++    _provision_winlibs()
+     winlibs = _winlibs_bin()
+     if winlibs is not None:
+         _prepend(winlibs)
++        warm_up()
+     found = _existing_ppc386()
+     if found is not None:
+         _prepend(found.parent)
+@@ -114,14 +213,152 @@ def ensure_toolchain() -> None:
+         _prepend(winlibs)
+ 
+ 
++def _extracted_pin() -> str | None:
++    """The WinLibs release the extracted tree was provisioned from, if recorded."""
++    try:
++        return (HOST / "winlibs.version").read_text().strip()
++    except OSError:
++        return None
++
++
++def _provision_winlibs() -> None:
++    """Extract the pinned WinLibs, replacing a tree that an older pin left behind."""
++    if _winlibs_bin() is not None and _extracted_pin() == WINLIBS_SHA256:
++        return
++    if _winlibs_bin() is not None:
++        print(
++            "Replacing the provisioned WinLibs tree, which is not the pinned "
++            "release…",
++            flush=True,
++        )
++        shutil.rmtree(HOST / "winlibs", ignore_errors=True)
++    archive = HOST / "winlibs.zip"
++    _fetch(WINLIBS_URL, archive, WINLIBS_SHA256)
++    print("Extracting WinLibs…", flush=True)
++    with zipfile.ZipFile(archive) as zf:
++        zf.extractall(HOST / "winlibs")
++    (HOST / "winlibs.version").write_text(WINLIBS_SHA256 + "\n")
++
++
+ def tool(name: str) -> Path:
+     ensure_toolchain()
++    winlibs = _winlibs_tool(prefix() + name + (".exe" if native() else ""), name + (".exe" if native() else ""))
++    if winlibs is not None:
++        # Provisioned tree first: a compiler and its binutils must not differ.
++        return winlibs
+     found = _which(prefix() + name) or _which(name)
+     if found is None:
+         raise FileNotFoundError(f"Required tool not found: {prefix()}{name}")
+     return found
+ 
+ 
++def find(name: str) -> Path | None:
++    """Locate a tool without failing, preferring the provisioned tree."""
++    ensure_toolchain()
++    suffix = ".exe" if native() else ""
++    return (
++        _winlibs_tool(prefix() + name + suffix, name + suffix)
++        or _which(prefix() + name)
++        or _which(name)
++    )
++
++
++def _winlibs_tool(*names: str) -> Path | None:
++    """Resolve a tool in the provisioned bin directory, never on PATH."""
++    bin_dir = _winlibs_bin()
++    if bin_dir is None:
++        return None
++    for name in names:
++        candidate = bin_dir / name
++        if candidate.is_file():
++            return candidate.resolve()
++    return None
++
++
++def cmake_program() -> Path:
++    """CMake to use, pinned to the WinLibs tree on a Windows host."""
++    if not native():
++        return Path("cmake")
++    ensure_toolchain()
++    found = _winlibs_tool("cmake.exe", "cmake")
++    if found is None:
++        raise FileNotFoundError(
++            f"CMake was not found inside the WinLibs tree at {HOST / 'winlibs'}. "
++            "Delete that directory to re-provision it, or install WinLibs manually "
++            "and keep cmake, ninja and make in the same bin directory."
++        )
++    return found
++
++
++GENERATORS = {
++    "ninja": ("Ninja", ("ninja.exe", "ninja")),
++    "make": ("MinGW Makefiles", ("mingw32-make.exe", "make.exe")),
++}
++
++
++def build_tool() -> tuple[str, Path]:
++    """Generator and its absolute program, named so CMake cannot find them on PATH.
++
++    SRHD_WINDOWS_GENERATOR switches ninja to make: ninja is probed before every
++    try_compile, so a blank answer stops a configure, while make is never probed.
++    """
++    ensure_toolchain()
++    wanted = os.environ.get("SRHD_WINDOWS_GENERATOR", "ninja").strip().lower()
++    if wanted not in GENERATORS:
++        raise ValueError(
++            f"SRHD_WINDOWS_GENERATOR={wanted!r}; expected one of "
++            + ", ".join(sorted(GENERATORS))
++        )
++    order = [wanted] if wanted != "ninja" else ["ninja", "make"]
++    for key in order:
++        generator, names = GENERATORS[key]
++        program = _winlibs_tool(*names)
++        if program is not None:
++            return (generator, program)
++    raise FileNotFoundError(
++        f"Neither ninja nor mingw32-make was found inside the WinLibs tree at "
++        f"{HOST / 'winlibs'}. Delete that directory to re-provision it."
++    )
++
++
++def cmake_generator_args(build_dir: Path | None = None) -> list[str]:
++    """Arguments that pin both the CMake generator and its build program."""
++    if not native():
++        return []  # Linux cross builds keep the distro CMake defaults.
++    generator, program = build_tool()
++    if build_dir is not None:
++        discard_stale_cache(build_dir, generator)
++    return [
++        "-G",
++        generator,
++        f"-DCMAKE_MAKE_PROGRAM={program.as_posix()}",
++    ]
++
++
++def cached_generator(build_dir: Path) -> str | None:
++    cache = build_dir / "CMakeCache.txt"
++    if not cache.is_file():
++        return None
++    try:
++        for line in cache.read_text(errors="replace").splitlines():
++            if line.startswith("CMAKE_GENERATOR:INTERNAL="):
++                return line.split("=", 1)[1].strip()
++    except OSError:
++        return None
++    return None
++
++
++def discard_stale_cache(build_dir: Path, generator: str) -> None:
++    """CMake refuses to switch generator in place; the tree is only generated files."""
++    previous = cached_generator(build_dir)
++    if previous is None or previous == generator:
++        return
++    print(
++        f"Recreating {build_dir}: generator changed from {previous} to {generator}",
++        flush=True,
++    )
++    shutil.rmtree(build_dir, ignore_errors=True)
++
+ 
+ def static_runtime() -> str:
+     gcc = tool("gcc")
+@@ -166,6 +403,9 @@ def bootstrap_fpc() -> Path:
+ 
+ def make() -> Path:
+     ensure_toolchain()
++    winlibs = _winlibs_tool("mingw32-make.exe", "make.exe")
++    if winlibs is not None:
++        return winlibs
+     found = _which("mingw32-make") or _which("gmake") or _which("make")
+     if found is None:
+         raise FileNotFoundError("GNU Make was not found")
