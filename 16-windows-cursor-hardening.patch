@@ -1,0 +1,695 @@
+diff --git a/source/ui/GI_Cursor.pas b/source/ui/GI_Cursor.pas
+index be564ef..7055a22 100644
+--- a/source/ui/GI_Cursor.pas
++++ b/source/ui/GI_Cursor.pas
+@@ -12,6 +12,9 @@
+ 
+ type
+ 
++  { Frames detached from the object, freed only after handoff. }
++  TCursorHandleList = array of Pointer;
++
+   TCursorGI = class;
+ 
+   TCursorGI = class(TObjectGI)
+@@ -22,6 +25,10 @@
+     FrameDelays: array of Integer;
+     FrameIndex: Integer;
+     AnimationTimer: PCallbackTimerGI;
++    AppliedPath: WideString;
++    AppliedOrigin: TPoint;
++    AppliedSystemMouse: Boolean;
++    OwnsDisplay: Boolean;
+     procedure Clear; override;
+     procedure SetOrigin(Origin: TPoint); override;
+     procedure SetActive(Enabled: Boolean); override;
+@@ -29,9 +36,21 @@
+     constructor Create(Owner: TObjectGI);
+     destructor Destroy; override;
+     procedure SetImage(const Path: WideString; Origin: TPoint);
+-    procedure RebuildSystemCursor;
+     function CreateNativeCursor(Buffer: TGraphBufGR; Hotspot: TPoint): Pointer;
+     procedure AdvanceAnimation(Timer: PCallbackTimerGI; UserData: PtrInt);
++    procedure StopAnimation;
++    function ServingHandle(FrameInSequence: Integer): Pointer;
++    procedure ReleaseHandles(Handles: array of Pointer);
++    function DetachCursorFrames: TCursorHandleList;
++    procedure DisplayAndRelease(Handle: Pointer; OldHandles: TCursorHandleList);
++    function HandOffToSystemArrow: Boolean;
++    procedure ShowCursorCounter(Show: Boolean);
++    procedure RebuildWithOld(
++        const RequestedPath: WideString;
++        OldHandles: TCursorHandleList
++    );
++    procedure SafeRebuildSystemCursor(const RequestedPath: WideString);
++    function BuildCursorFrames: Pointer;
+   end;
+ 
+ implementation
+@@ -39,6 +58,7 @@
+ uses
+   GameWindow,
+   Classes,
++  Math,
+   EC_Cache,
+   EC_CacheGAI,
+   EC_CacheGI,
+@@ -47,6 +67,48 @@
+   SysUtils,
+   SDL2;
+ 
++const
++  { Tried only after a refusal, so accepted art is never resampled. }
++  CursorRetryBoxes: array[0..2] of Integer = (64, 32, 16);
++  { Triangle. }
++  CursorDownscaleFilter = 1;
++  { Both counts come out of a GAI file and size arrays. }
++  MaxCursorFrameCount = 4096;
++  { A stuck ShowCursor counter must not spin in the pump. }
++  MaxCursorCounterSteps = 1024;
++  SystemCursorArrow = 0;
++
++{
++  SDL_SetCursor(nil) re-applies the current cursor rather than selecting the
++  arrow, so a substitute has to be a real one. Never freed: that would leave
++  every screen on a destroyed cursor.
++}
++var
++  SystemArrowCursor: Pointer;
++
++function SystemArrowHandle: Pointer;
++begin
++  if SystemArrowCursor = nil then
++    SystemArrowCursor := SDL_CreateSystemCursor(SystemCursorArrow);
++  Result := SystemArrowCursor;
++end;
++
++{ Suppresses repeats of the same complaint. }
++var
++  LastCursorFailureLog: AnsiString;
++
++procedure LogCursorFailure(const Path: WideString; const Reason: string);
++var
++  Line: AnsiString;
++begin
++  Line :=
++      AnsiString(WideString('Cursor build failed: ' + Path + ' - ' + WideString(Reason)));
++  if Line = LastCursorFailureLog then
++    Exit;
++  LastCursorFailureLog := Line;
++  AppendLogLineThreadSafe(Line);
++end;
++
+ constructor TCursorGI.Create(Owner: TObjectGI);
+ begin
+   inherited Create(Owner);
+@@ -55,73 +117,214 @@
+ end;
+ 
+ destructor TCursorGI.Destroy;
+-var
+-  Index: Integer;
+ begin
+-  if AnimationTimer <> nil then
+-  begin
+-    MessageLoop.CancelCallbackTimer(AnimationTimer);
+-    AnimationTimer := nil;
+-  end;
+-  for Index := 0 to High(CursorHandles) do
+-    if CursorHandles[Index] <> nil then
+-    begin
+-      SDL_FreeCursor(CursorHandles[Index]);
+-      CursorHandles[Index] := nil;
+-    end;
+-  ImagePath := '';
++  StopAnimation;
++  if (not OwnsDisplay) or HandOffToSystemArrow then
++    ReleaseHandles(CursorHandles);
+   CursorHandles := nil;
++  ImagePath := '';
+   FrameIndices := nil;
+   FrameDelays := nil;
+   inherited Destroy;
+ end;
+ 
+ procedure TCursorGI.Clear;
+-var
+-  Index: Integer;
++begin
++  if (not OwnsDisplay) or HandOffToSystemArrow then
++    ReleaseHandles(DetachCursorFrames);
++  ImagePath := '';
++  ImageControl.Clear;
++end;
++
++function TCursorGI.DetachCursorFrames: TCursorHandleList;
++begin
++  StopAnimation;
++  Result := CursorHandles;
++  CursorHandles := nil;
++  FrameIndices := nil;
++  FrameDelays := nil;
++  AppliedPath := '';
++end;
++
++procedure TCursorGI.StopAnimation;
+ begin
+   if AnimationTimer <> nil then
+   begin
+     MessageLoop.CancelCallbackTimer(AnimationTimer);
+     AnimationTimer := nil;
+   end;
+-  for Index := 0 to High(CursorHandles) do
+-    if CursorHandles[Index] <> nil then
++end;
++
++procedure TCursorGI.ReleaseHandles(Handles: array of Pointer);
++var
++  Index: Integer;
++begin
++  for Index := 0 to High(Handles) do
++    if Handles[Index] <> nil then
+     begin
+-      SDL_FreeCursor(CursorHandles[Index]);
+-      CursorHandles[Index] := nil;
++      SDL_FreeCursor(Handles[Index]);
++      Handles[Index] := nil;
+     end;
+-  ImagePath := '';
+-  CursorHandles := nil;
+-  FrameIndices := nil;
+-  FrameDelays := nil;
+-  ImageControl.Clear;
++end;
++
++{ Callers may free the outgoing frames only when this returns True. }
++function TCursorGI.HandOffToSystemArrow: Boolean;
++var
++  Arrow: Pointer;
++begin
++  Arrow := SystemArrowHandle;
++  if Arrow = nil then
++  begin
++    LogCursorFailure(ImagePath, 'no system arrow cursor');
++    Exit(False);
++  end;
++  SDL_SetCursor(Arrow);
++  OwnsDisplay := False;
++  Exit(True);
++end;
++
++procedure TCursorGI.DisplayAndRelease(Handle: Pointer; OldHandles: TCursorHandleList);
++begin
++  if Handle = nil then
++  begin
++    if HandOffToSystemArrow then
++      ReleaseHandles(OldHandles);
++    Exit;
++  end;
++  SDL_SetCursor(Handle);
++  OwnsDisplay := True;
++  ReleaseHandles(OldHandles);
++end;
++
++procedure TCursorGI.ShowCursorCounter(Show: Boolean);
++var
++  Steps: Integer;
++begin
++  Steps := 0;
++  if Show then
++  begin
++    while (ShowGameCursor(True) < 0) and (Steps < MaxCursorCounterSteps) do
++      Inc(Steps);
++  end
++  else
++  begin
++    while (ShowGameCursor(False) >= 0) and (Steps < MaxCursorCounterSteps) do
++      Inc(Steps);
++  end;
++end;
++
++{ A GAI sequence table can name a frame that has no handle behind it. }
++function TCursorGI.ServingHandle(FrameInSequence: Integer): Pointer;
++var
++  Index, Candidate: Integer;
++begin
++  Result := nil;
++  if (FrameInSequence >= 0) and (FrameInSequence <= High(FrameIndices)) then
++  begin
++    Candidate := FrameIndices[FrameInSequence];
++    if (Candidate >= 0) and (Candidate <= High(CursorHandles)) then
++      Result := CursorHandles[Candidate];
++  end;
++  if Result = nil then
++    for Index := 0 to High(CursorHandles) do
++      if CursorHandles[Index] <> nil then
++      begin
++        Result := CursorHandles[Index];
++        Break;
++      end;
++end;
++
++procedure TCursorGI.RebuildWithOld(
++    const RequestedPath: WideString;
++    OldHandles: TCursorHandleList
++);
++var
++  Handle: Pointer;
++begin
++  Handle := nil;
++  try
++    Handle := BuildCursorFrames;
++  except
++    on E: Exception do
++      begin
++        LogCursorFailure(RequestedPath, E.Message);
++        Handle := nil;
++      end;
++  end;
++  if Handle = nil then
++    LogCursorFailure(RequestedPath, 'no cursor handle');
++  if Active then
++  begin
++    ShowCursorCounter(True);
++    DisplayAndRelease(Handle, OldHandles);
++    if (Handle <> nil) and (High(FrameIndices) > 0) then
++    begin
++      StopAnimation;
++      AnimationTimer :=
++          MessageLoop.ScheduleCallbackTimer(
++              Max(1, FrameDelays[Min(FrameIndex, High(FrameDelays))]),
++              Max(1, FrameDelays[Min(FrameIndex, High(FrameDelays))]),
++              AdvanceAnimation
++          );
++    end;
++  end
++  else
++  begin
++    if (not OwnsDisplay) or HandOffToSystemArrow then
++      ReleaseHandles(OldHandles);
++  end;
++end;
++
++procedure TCursorGI.SafeRebuildSystemCursor(const RequestedPath: WideString);
++begin
++  try
++    RebuildWithOld(RequestedPath, DetachCursorFrames);
++  except
++    on E: Exception do
++      LogCursorFailure(RequestedPath, E.Message);
++  end;
+ end;
+ 
+ procedure TCursorGI.SetImage(const Path: WideString; Origin: TPoint);
++var
++  OldHandles: array of Pointer;
++  NewFrame: Boolean;
+ begin
+-  Clear;
+-  // Image and hotspot form one cursor. Rebuilding between these updates can
+-  // put the previous hotspot outside the new image (especially cropped GAI frames).
++  if (Path = AppliedPath)
++      and (Origin.X = AppliedOrigin.X)
++      and (Origin.Y = AppliedOrigin.Y)
++      and (ShowSystemMouse = AppliedSystemMouse) then
++    Exit;
++  NewFrame := ImagePath <> Path;
++  // Not Clear: the outgoing frames may still be the ones on screen.
++  OldHandles := DetachCursorFrames;
++  ImageControl.Clear;
+   inherited SetOrigin(Origin);
+   ImageControl.SetPosition(Classes.Point(-Origin.X, -Origin.Y));
+   if ShowSystemMouse then
+   begin
+-    if ImagePath <> Path then
++    if NewFrame then
+       FrameIndex := 0;
+     ImagePath := Path;
+-    RebuildSystemCursor;
++    RebuildWithOld(Path, OldHandles);
+   end
+   else
+   begin
++    if (not OwnsDisplay) or HandOffToSystemArrow then
++      ReleaseHandles(OldHandles);
+     ImageControl.SetImagePath(Path);
+     SetSize(ImageControl.GetContentSize);
+     ImageControl.SetSize(ClientSize);
+     ImageControl.RestartPlayback;
+   end;
++  AppliedPath := Path;
++  AppliedOrigin := Origin;
++  AppliedSystemMouse := ShowSystemMouse;
+ end;
+ 
+ procedure TCursorGI.SetActive(Enabled: Boolean);
++var
++  Handle: Pointer;
+ begin
+   Invalidate;
+   inherited SetActive(Enabled);
+@@ -129,24 +332,20 @@
+   begin
+     if Enabled then
+     begin
+-      if (High(CursorHandles) >= 0) and (CursorHandles[0] <> nil) then
++      Handle := ServingHandle(0);
++      if Handle <> nil then
+       begin
+         FrameIndex := 0;
+-        if CursorHandles[FrameIndex] <> nil then
+-          SDL_SetCursor(CursorHandles[FrameIndex]);
+-        while ShowGameCursor(True) < 0 do
+-          ;
++        SDL_SetCursor(Handle);
++        OwnsDisplay := True;
++        ShowCursorCounter(True);
+         if High(FrameIndices) > 0 then
+         begin
+-          if AnimationTimer <> nil then
+-          begin
+-            MessageLoop.CancelCallbackTimer(AnimationTimer);
+-            AnimationTimer := nil;
+-          end;
++          StopAnimation;
+           AnimationTimer :=
+               MessageLoop.ScheduleCallbackTimer(
+-                  FrameDelays[FrameIndex],
+-                  FrameDelays[FrameIndex],
++                  Max(1, FrameDelays[Min(FrameIndex, High(FrameDelays))]),
++                  Max(1, FrameDelays[Min(FrameIndex, High(FrameDelays))]),
+                   AdvanceAnimation
+               );
+         end;
+@@ -154,13 +353,8 @@
+     end
+     else
+     begin
+-      if AnimationTimer <> nil then
+-      begin
+-        MessageLoop.CancelCallbackTimer(AnimationTimer);
+-        AnimationTimer := nil;
+-      end;
+-      while ShowGameCursor(False) >= 0 do
+-        ;
++      StopAnimation;
++      ShowCursorCounter(False);
+     end;
+   end
+   else
+@@ -172,10 +366,12 @@
+ 
+ procedure TCursorGI.SetOrigin(Origin: TPoint);
+ begin
++  if (Origin.X = OriginPoint.X) and (Origin.Y = OriginPoint.Y) then
++    Exit;
+   inherited SetOrigin(Origin);
+   ImageControl.SetPosition(Classes.Point(-Origin.X, -Origin.Y));
+   if ShowSystemMouse then
+-    RebuildSystemCursor;
++    SafeRebuildSystemCursor(ImagePath);
+ end;
+ 
+ procedure TCursorGI.Draw(ClipRect: TRect);
+@@ -183,7 +379,7 @@
+   inherited Draw(ClipRect);
+ end;
+ 
+-procedure TCursorGI.RebuildSystemCursor;
++function TCursorGI.BuildCursorFrames: Pointer;
+ var
+   GaiControl: TCGaiControlEC;
+   GiControl: TCGiControlEC;
+@@ -193,21 +389,9 @@
+   Kind, Path: WideString;
+   Buffer: TGraphBufGR;
+   Hotspot: TPoint;
++  FrameCount, SequenceCount: Integer;
+ begin
+-  if AnimationTimer <> nil then
+-  begin
+-    MessageLoop.CancelCallbackTimer(AnimationTimer);
+-    AnimationTimer := nil;
+-  end;
+-  for Index := 0 to High(CursorHandles) do
+-    if CursorHandles[Index] <> nil then
+-    begin
+-      SDL_FreeCursor(CursorHandles[Index]);
+-      CursorHandles[Index] := nil;
+-    end;
+-  CursorHandles := nil;
+-  FrameIndices := nil;
+-  FrameDelays := nil;
++  Result := nil;
+   Path := ImagePath;
+   Kind := ExtractNextDelimitedPartW(Path, ',');
+   if Kind = 'GAI' then
+@@ -216,27 +400,49 @@
+     GlobalCache.ResetControl(GaiControl);
+     GaiControl.SetCacheKey(Path);
+     Buffer := TGraphBufGR.Create(False);
+-    Gai := AcquireCachedGai(GaiControl);
+     try
+-      SetLength(CursorHandles, Gai.GetFrameCount);
+-      SetLength(FrameIndices, Gai.GetSequenceFrameCount(0));
+-      SetLength(FrameDelays, Gai.GetSequenceFrameCount(0));
+-      Gai.FillSequenceFrameIndexTable(0, Pointer(FrameIndices), 4);
+-      Gai.FillSequenceFrameDelayTable(0, Pointer(FrameDelays), 4);
+-      for Index := 0 to High(CursorHandles) do
+-      begin
+-        Gai.LoadFrameGi(Index).DecodeToGraphBuf(Buffer, False);
+-        Hotspot.X :=
+-            OriginPoint.X - (Gai.LoadFrameGi(Index).GetBoundsRect.Left - Gai.GetBoundsRect.Left);
+-        Hotspot.Y :=
+-            OriginPoint.Y - (Gai.LoadFrameGi(Index).GetBoundsRect.Top - Gai.GetBoundsRect.Top);
+-        CursorHandles[Index] := CreateNativeCursor(Buffer, Hotspot);
++      Gai := AcquireCachedGai(GaiControl);
++      try
++        FrameCount := Gai.GetFrameCount;
++        if (FrameCount > 0) and (FrameCount <= MaxCursorFrameCount) then
++        begin
++          SequenceCount := 0;
++          if Gai.GetSequenceCount > 0 then
++            SequenceCount := Gai.GetSequenceFrameCount(0);
++          if (SequenceCount < 1) or (SequenceCount > MaxCursorFrameCount) then
++            SequenceCount := 1;
++          SetLength(CursorHandles, FrameCount);
++          SetLength(FrameIndices, SequenceCount);
++          SetLength(FrameDelays, SequenceCount);
++          for Index := 0 to SequenceCount - 1 do
++          begin
++            FrameIndices[Index] := 0;
++            FrameDelays[Index] := 0;
++          end;
++          if Gai.GetSequenceCount > 0 then
++          begin
++            Gai.FillSequenceFrameIndexTable(0, Pointer(FrameIndices), 4);
++            Gai.FillSequenceFrameDelayTable(0, Pointer(FrameDelays), 4);
++          end;
++          for Index := 0 to High(CursorHandles) do
++          begin
++            Gai.LoadFrameGi(Index).DecodeToGraphBuf(Buffer, False);
++            Hotspot.X :=
++                OriginPoint.X
++                    - (Gai.LoadFrameGi(Index).GetBoundsRect.Left - Gai.GetBoundsRect.Left);
++            Hotspot.Y :=
++                OriginPoint.Y
++                    - (Gai.LoadFrameGi(Index).GetBoundsRect.Top - Gai.GetBoundsRect.Top);
++            CursorHandles[Index] := CreateNativeCursor(Buffer, Hotspot);
++          end;
++        end;
++      finally
++        GaiControl.Release;
+       end;
+     finally
+-      GaiControl.Release;
++      Buffer.Free;
++      GaiControl.Free;
+     end;
+-    Buffer.Free;
+-    GaiControl.Free;
+   end
+   else if Kind = 'GI' then
+   begin
+@@ -263,79 +469,117 @@
+   end;
+   if (FrameIndex < 0) or (High(FrameIndices) < FrameIndex) then
+     FrameIndex := 0;
+-  if Active and (Length(FrameIndices) > 0) then
+-  begin
+-    SDL_SetCursor(CursorHandles[FrameIndices[FrameIndex]]);
+-    while ShowGameCursor(True) < 0 do
+-      ;
+-    if High(FrameIndices) > 0 then
+-    begin
+-      if AnimationTimer <> nil then
+-      begin
+-        MessageLoop.CancelCallbackTimer(AnimationTimer);
+-        AnimationTimer := nil;
+-      end;
+-      AnimationTimer :=
+-          MessageLoop.ScheduleCallbackTimer(
+-              FrameDelays[FrameIndex],
+-              FrameDelays[FrameIndex],
+-              AdvanceAnimation
+-          );
+-    end;
+-  end;
++  Result := ServingHandle(FrameIndex);
+ end;
+ 
+ function TCursorGI.CreateNativeCursor(Buffer: TGraphBufGR; Hotspot: TPoint): Pointer;
+ var
+-  Surface: Pointer;
+-  HotX, HotY, W, H: Integer;
++  Scaled: TGraphBufGR;
++  HotX, HotY, W, H, Box, TargetW, TargetH, Level: Integer;
++  Scale: Double;
++
++  function BuildFrom(
++      SrcBuf: TGraphBufGR;
++      HotspotX, HotspotY: Integer;
++      const Reason: string
++  ): Pointer;
++  var
++    Surface: Pointer;
++  begin
++    Result := nil;
++    if (SrcBuf.Width <= 0) or (SrcBuf.Height <= 0) or (SrcBuf.GetPixels = nil) then
++      Exit;
++    Surface :=
++        SDL_CreateRGBSurfaceFrom(
++            SrcBuf.GetPixels,
++            SrcBuf.Width,
++            SrcBuf.Height,
++            32,
++            SrcBuf.PitchBytes,
++            $FF0000,
++            $FF00,
++            $FF,
++            $FF000000
++        );
++    if Surface = nil then
++      LogCursorFailure(ImagePath, 'cursor surface: ' + string(SDL_GetError))
++    else
++      try
++        Result := SDL_CreateColorCursor(Surface, HotspotX, HotspotY);
++        if Result = nil then
++          LogCursorFailure(ImagePath, Reason + ': ' + string(SDL_GetError));
++      finally
++        SDL_FreeSurface(Surface);
++      end;
++  end;
++
+ begin
+-  // Clamp hotspot: SDL requires it inside the surface.
+   W := Buffer.Width;
+   H := Buffer.Height;
+-  HotX := Hotspot.X;
+-  HotY := Hotspot.Y;
+-  if HotX < 0 then HotX := 0;
+-  if HotY < 0 then HotY := 0;
+-  if (W > 0) and (HotX >= W) then HotX := W - 1;
+-  if (H > 0) and (HotY >= H) then HotY := H - 1;
+   if (W <= 0) or (H <= 0) then
+   begin
+     Result := nil;
+     Exit;
+   end;
+-  Surface :=
+-      SDL_CreateRGBSurfaceFrom(
+-          Buffer.GetPixels, W, H, 32, Buffer.PitchBytes,
+-          $FF0000, $FF00, $FF, $FF000000);
+-  if Surface = nil then
+-    RaiseWideMessage('Cursor surface: ' + string(SDL_GetError));
+-  try
+-    Result := SDL_CreateColorCursor(Surface, HotX, HotY);
+-    if Result = nil then
+-      RaiseWideMessage('Cursor: ' + string(SDL_GetError));
+-  finally
+-    SDL_FreeSurface(Surface);
++  HotX := Hotspot.X;
++  HotY := Hotspot.Y;
++  if HotX < 0 then HotX := 0;
++  if HotY < 0 then HotY := 0;
++  if HotX >= W then HotX := W - 1;
++  if HotY >= H then HotY := H - 1;
++  Result := BuildFrom(Buffer, HotX, HotY, 'CreateColorCursor');
++  if Result <> nil then
++    Exit;
++  for Level := 0 to High(CursorRetryBoxes) do
++  begin
++    Box := CursorRetryBoxes[Level];
++    if (W <= Box) and (H <= Box) then
++      Continue;
++    Scale := Box / Max(W, H);
++    TargetW := Max(1, Min(Box, Round(W * Scale)));
++    TargetH := Max(1, Min(Box, Round(H * Scale)));
++    Scaled := TGraphBufGR.Create(False);
++    try
++      // Free cannot release the source: RescaleRgba swaps in owned memory.
++      Scaled.AttachPixels(W, H, Buffer.PitchBytes, Buffer.GetPixels);
++      Scaled.RescaleRgba(TargetW, TargetH, CursorDownscaleFilter);
++      Result :=
++          BuildFrom(
++              Scaled,
++              Max(0, Min(Scaled.Width - 1, Round(HotX * Scale))),
++              Max(0, Min(Scaled.Height - 1, Round(HotY * Scale))),
++              'CreateColorCursor at ' + IntToStr(Box)
++          );
++    finally
++      Scaled.Free;
++    end;
++    if Result <> nil then
++      Exit;
+   end;
++  Result := nil;
+ end;
+ 
+ procedure TCursorGI.AdvanceAnimation(Timer: PCallbackTimerGI; UserData: PtrInt);
++var
++  Handle: Pointer;
++  Delay: Integer;
+ begin
++  if High(FrameIndices) < 0 then
++    Exit;
+   Inc(FrameIndex);
+   if High(FrameIndices) < FrameIndex then
+     FrameIndex := 0;
+-  SDL_SetCursor(CursorHandles[FrameIndices[FrameIndex]]);
+-  if AnimationTimer <> nil then
++  Handle := ServingHandle(FrameIndex);
++  if Handle = nil then
+   begin
+-    MessageLoop.CancelCallbackTimer(AnimationTimer);
+-    AnimationTimer := nil;
++    StopAnimation;
++    Exit;
+   end;
++  SDL_SetCursor(Handle);
++  StopAnimation;
++  Delay := Max(1, FrameDelays[Min(FrameIndex, High(FrameDelays))]);
+   AnimationTimer :=
+-      MessageLoop.ScheduleCallbackTimer(
+-          FrameDelays[FrameIndex],
+-          FrameDelays[FrameIndex],
+-          AdvanceAnimation
+-      );
++      MessageLoop.ScheduleCallbackTimer(Delay, Delay, AdvanceAnimation);
+ end;
+ 
+ end.
+diff --git a/platform/SDL2.pas b/platform/SDL2.pas
+index cbead7c..530cf9a 100644
+--- a/platform/SDL2.pas
++++ b/platform/SDL2.pas
+@@ -378,6 +378,9 @@
+ ): Pointer; cdecl; external SDL2Library;
+ procedure SDL_SetCursor(Cursor: Pointer); cdecl; external SDL2Library;
+ procedure SDL_FreeCursor(Cursor: Pointer); cdecl; external SDL2Library;
++{ SDL_SetCursor(nil) redraws the current cursor, it does not select the arrow. }
++function SDL_CreateSystemCursor(SystemCursor: Integer): Pointer; cdecl;
++    external SDL2Library;
+ function SDL_ShowCursor(Visible: Integer): Integer; cdecl; external SDL2Library;
+ function SDL_GetClipboardText: PAnsiChar; cdecl; external SDL2Library;
+ function SDL_SetClipboardText(Text: PAnsiChar): Integer; cdecl; external SDL2Library;

@@ -3,7 +3,7 @@
 This repo contains patches that enhance [reverse-engineered version of Space Rangers HD](//github.com/pakompom/SpaceRangersHD_FPC) written in FreePascal, and provide the following features missing from the upstream:
 
 - Windows target and host support: cross-build on any modern Linux or Windows 7 through 11
-- Fixes to both Linux and Windows targets: robust build system, proper SDL integration, critical bug fixes
+- Fixes to both Linux and Windows targets: robust build system, proper SDL integration, bug fixes
 - Semi-static and semi-portable Linux target (WIP)
 
 **NB: upstream repo also announces support for macOS targets.** I do not have any Mac computer in my posession, so I cannot verify that my changes did not break the target. If they are, and you can verifiably fix this, open a pull request. **Until then, consider that this repo DOES NOT support macOS.**
@@ -21,13 +21,25 @@ Those are located at `vendor/` of the upstream repo.
 
 You bet. I began working on this during my vacation, and these changes have very limited testing. I have fixed all of the crashes I've encountered immediately, but I'm certain that there's a lot of them still lurking beneath.
 
-With that said, binaries were confirmed to launch on Windows 7 (with caveats), 10 and 11, Linux Mint 22.1 Xia, Debian Trixie and SteamOS 3.8.28.
+# Supported OS?
+
+This project can produce binaries for Linux and Windows. As stated above, we do not support macOS neither as a host nor a target (yet?).
+
+Binaries have been tested and confirmed working on Windows 7 (with caveats), 10 and 11, Linux Mint 22.1 Xia, Debian Trixie and SteamOS 3.8.28.
 
 # But upstream supports Linux now, doesn't it? Maybe it will support Windows?
 
-Maybe, maybe not. In any case, it does not right now, and Linux target of the upstream looks untested and contains several serious issues with SDL.
+Maybe, maybe not.
+
+In any case, it does not right now, and Linux target of the upstream looks untested and contains several serious issues with SDL.
 
 Bottom line: I had some extra time, so I decided to patch stuff up.
+
+# But upstream has already moved further and got updated!
+
+I know. I do not plan to blindly follow their changes. I'll take what I need from it, if I need it.
+
+I do this for fun, not to be up-to-date.
 
 # What has been fixed?
 
@@ -35,7 +47,9 @@ Apart from build system - mainly SDL integration. Now we have DPI awareness, pro
 
 I have also fixed a couple of crashes that upstream is yet to fix, and added a bit of polish so Steam Deck trackpads would work properly too.
 
-No gameplay or balance changes.
+Windows 7 client support also required some targeted tinkering, mainly in toolchain and SDL integration, due to this OS advanced age.
+
+Otherwise, I try not to introduce any gameplay or balance changes.
 
 # Cross-platform support details?
 
@@ -49,11 +63,9 @@ By default, Linux builds use vendored fpc fork, but you can also build them with
 
 I see no reason why this won't build on any other recent Linux, but you'll have to adapt dependencies from below to your distro by yourself. For instance, on Arch or CachyOS you might need to install mingw64 from AUR or extra repos.
 
-**NB:** macOS builds are untested and unverified. I have no hardware to run them on, nor the desire to debug the build. I'm sure that I broke a lot of Mac stuff on the way, so if anyone wants to test that and/or ship some fixes - feel free to open a pull request.
-
 # How to apply patches and build binaries?
 
-This section has gotten way too big and was moved to a separate document, see [BUILD](docs/BUILD.md).
+This section has gotten way too big and was moved to a separate document, see [BUILD.md](docs/BUILD.md).
 
 **NB:** an active internet connection is **REQUIRED** for Windows target builds to complete, as mingw will live-download required dependencies. First build might take a while.
 

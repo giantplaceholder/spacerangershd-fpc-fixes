@@ -6,7 +6,9 @@ It assumes that you are somewhat of a power user, so we won't be covering the ba
 
 # Supported host operating systems
 
-This project can be built both on Linux and Windows. Upstream also supports macOS host builds, but those are not tested with my changes, and as such, can be considered as not supported as of now.
+This project can be built both on Linux and Windows. 
+
+Upstream also supports macOS host builds, but this project specifically does not support them yet.
 
 Linux distros tested:
 
@@ -24,7 +26,7 @@ Windows versions tested:
 
 You will require third-party homebrew versions of Python 3.1x and Git-for-Windows installed, since current versions of both of them require Windows 10 as a minimum. Plus to that, WinLibs toolkit that is used here to provide building environment is partially UCRT-linked, so you will also have to install UCRT patches to make it work properly.
 
-**TL;DR: just update to 10/11 or switch to Linux, it's 2026 for fuck's sake.** But if you want to suffer, see [BUILD_WIN7](docs/BUILD_WIN7.md).
+**TL;DR: just update to 10/11 or switch to Linux, it's 2026 for fuck's sake.** But if you want to suffer, see [BUILD_WIN7](BUILD_WIN7.md).
 
 At the moment, builds were tested only on x86_64 hosts. I have no ARM-powered PCs at my disposal right now, and I do not plan to support 32-bit platforms either.
 
