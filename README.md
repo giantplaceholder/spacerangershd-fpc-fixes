@@ -5,6 +5,7 @@ This repo contains patches that enhance [reverse-engineered version of Space Ran
 - Windows target and host support: cross-build on any modern Linux or Windows 7 through 11
 - Fixes to both Linux and Windows targets: robust build system, proper SDL integration, bug fixes
 - Semi-static and semi-portable Linux target (WIP)
+- Support for a cross-platform version of [MatrixGame](https://github.com/giantplaceholder/matrixgame-bgfx) (planetary battles engine)
 
 **NB: upstream repo also announces support for macOS targets.** I do not have any Mac computer in my posession, so I cannot verify that my changes did not break the target. If they are, and you can verifiably fix this, open a pull request. **Until then, consider that this repo DOES NOT support macOS.**
 
@@ -86,6 +87,10 @@ For example, on Deck you can run: `./Rangers --game-dir=/home/deck/.steam/steam/
 The same will work on any Linux, just adapt the path to the directory containing game's assets.
 
 - Windows: just double-click `Rangers.exe` and wait for the game to start.
+
+# How to enable planetary battles?
+
+You will need to build a modified version of MatrixGame made to run on Windows and Linux. Visit [matrixgame-bgfx](https://github.com/giantplaceholder/matrixgame-bgfx) repo for more details.
 
 # AI involvement?
 

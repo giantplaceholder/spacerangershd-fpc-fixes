@@ -1,0 +1,617 @@
+diff --git a/platform/GameUtf32.pas b/platform/GameUtf32.pas
+new file mode 100644
+index 0000000..3e57f51
+--- /dev/null
++++ b/platform/GameUtf32.pas
+@@ -0,0 +1,126 @@
++unit GameUtf32;
++
++{$MODE DELPHI}
++{$POINTERMATH ON}
++
++// Character bridge with the C++ planetary battle engine. Its wchar_t is 4 bytes
++// on Unix and 2 bytes on Windows, while game strings are UTF-16 everywhere.
++// Self-contained because the vendored RTL ships no utf16enc/utf32enc units.
++
++interface
++
++type
++  // Engine character: matches sizeof(wchar_t) on the target.
++  LongWChar = Cardinal;
++  PLongWChar = ^LongWChar;
++{$IFDEF MSWINDOWS}
++  EngineChar = WideChar;
++  PEngineChar = PWideChar;
++  TEngineCharArray = array of WideChar;
++{$ELSE}
++  EngineChar = LongWChar;
++  PEngineChar = PLongWChar;
++  TEngineCharArray = array of LongWChar;
++{$ENDIF}
++
++// Zero-terminated engine-width copy of Text, always at least one element, so
++// PEngineChar(@Buffer[0]) is valid even for ''. The caller must keep the array
++// alive while the engine can still read it.
++function EngineBuffer(const Text: WideString): TEngineCharArray;
++
++// Inverse. '' for nil.
++function EngineText(Text: PEngineChar): WideString;
++
++implementation
++
++function EngineBuffer(const Text: WideString): TEngineCharArray;
++var
++  Index, Last, Written: Integer;
++  HighSurrogate, LowSurrogate: Cardinal;
++begin
++  Last := Length(Text);
++{$IFDEF MSWINDOWS}
++  SetLength(Result, Last + 1);
++  for Index := 1 to Last do
++    Result[Index - 1] := Text[Index];
++  Result[Last] := WideChar(0);
++{$ELSE}
++  // Room for one code point per UTF-16 unit plus the terminator.
++  SetLength(Result, Last + 1);
++  Written := 0;
++  Index := 1;
++  while Index <= Last do
++  begin
++    HighSurrogate := Ord(Text[Index]);
++    if (HighSurrogate >= $D800) and (HighSurrogate <= $DBFF) and (Index < Last) then
++    begin
++      LowSurrogate := Ord(Text[Index + 1]);
++      if (LowSurrogate >= $DC00) and (LowSurrogate <= $DFFF) then
++      begin
++        Result[Written] := $10000 + (HighSurrogate - $D800) * $400 +
++            (LowSurrogate - $DC00);
++        Inc(Written);
++        Inc(Index, 2);
++        Continue;
++      end;
++    end;
++    Result[Written] := HighSurrogate;
++    Inc(Written);
++    Inc(Index);
++  end;
++  if Written < Last then
++    SetLength(Result, Written + 1);
++  Result[Written] := LongWChar(0);
++{$ENDIF}
++end;
++
++function EngineText(Text: PEngineChar): WideString;
++var
++  Index, Written, Units: Integer;
++  Code: Cardinal;
++begin
++  Result := '';
++  if Text = nil then
++    Exit;
++{$IFDEF MSWINDOWS}
++  Units := 0;
++  while Text[Units] <> WideChar(0) do
++    Inc(Units);
++  SetLength(Result, Units);
++  for Index := 0 to Units - 1 do
++    Result[Index + 1] := Text[Index];
++{$ELSE}
++  Units := 0;
++  Index := 0;
++  while Text[Index] <> 0 do
++  begin
++    if Text[Index] <= $FFFF then
++      Inc(Units)
++    else
++      Inc(Units, 2);
++    Inc(Index);
++  end;
++  SetLength(Result, Units);
++  Written := 0;
++  Index := 0;
++  while (Text[Index] <> 0) and (Written < Units) do
++  begin
++    Code := Text[Index];
++    if Code <= $FFFF then
++    begin
++      Result[Written + 1] := WideChar(Code);
++      Inc(Written);
++    end
++    else
++    begin
++      Dec(Code, $10000);
++      Result[Written + 1] := WideChar($D800 + (Code shr 10));
++      Result[Written + 2] := WideChar($DC00 + (Code and $3FF));
++      Inc(Written, 2);
++    end;
++    Inc(Index);
++  end;
++{$ENDIF}
++end;
++
++end.
+diff --git a/platform/GameWindow.pas b/platform/GameWindow.pas
+index 7ab4461..0a3fd12 100644
+--- a/platform/GameWindow.pas
++++ b/platform/GameWindow.pas
+@@ -27,6 +27,7 @@ function GameDoubleClickTime: Cardinal;
+ procedure GetGameMouse(out Point: TPoint);
+ procedure WarpGameMouse(X, Y: Integer);
+ procedure ConfineGameMouse;
++procedure ReleaseGameWindowInput;
+ procedure ApplyIntegerScale;
+ procedure GameOutputSize(out W, H: Integer);
+ function ShowGameCursor(Show: Boolean): Integer;
+@@ -809,6 +810,17 @@ begin
+   SDL_SetWindowMouseRect(GameSDLWindow, @Bounds);
+ end;
+ 
++procedure ReleaseGameWindowInput;
++begin
++  // The native battle engine draws in its own window and SDL instance. While
++  // this process holds a grab or a mouse rect, X routes pointer events only to
++  // our window, so the battle window could never be clicked.
++  if GameSDLWindow = nil then
++    Exit;
++  SDL_SetWindowMouseRect(GameSDLWindow, nil);
++  SDL_SetWindowGrab(GameSDLWindow, 0);
++end;
++
+ procedure WarpGameMouse(X, Y: Integer);
+ var
+   OffsetX, OffsetY: Integer;
+diff --git a/source/game/Robot.pas b/source/game/Robot.pas
+index 5a920bd..f3e4338 100644
+--- a/source/game/Robot.pas
++++ b/source/game/Robot.pas
+@@ -7,6 +7,7 @@ interface
+ uses
+   Dynlibs,
+   GameWindow,
++  GameUtf32,
+   Types,
+   GR_Sound,
+   GR_GraphBuf,
+@@ -32,23 +33,29 @@ type
+ 
+   PRobotTextImage = PointerToTRobotTextImage;
+ 
+-  TRobotPlaySound = procedure(Name: PWideChar); stdcall;
++  // The engine stores the handle as a pointer-sized value, so an object
++  // reference survives the round trip on 64-bit targets.
++  RobotSoundHandle = NativeUInt;
++
++  // Strings cross as engine-width characters: UTF-16 on Windows, 4-byte
++  // wchar_t on Unix. See GameUtf32.
++  TRobotPlaySound = procedure(Name: PEngineChar); stdcall;
+ 
+   TRobotCreateSound =
+-      function(Name: PWideChar; Group: Integer; Looping: Integer): TSoundBufferControl; stdcall;
++      function(Name: PEngineChar; Group: Integer; Looping: Integer): RobotSoundHandle; stdcall;
+ 
+-  TRobotSoundAction = procedure(Sound: TSoundBufferControl); stdcall;
++  TRobotSoundAction = procedure(Sound: RobotSoundHandle); stdcall;
+ 
+-  TRobotSoundQuery = function(Sound: TSoundBufferControl): Integer; stdcall;
++  TRobotSoundQuery = function(Sound: RobotSoundHandle): Integer; stdcall;
+ 
+-  TRobotSoundSetValue = procedure(Sound: TSoundBufferControl; Value: Single); stdcall;
++  TRobotSoundSetValue = procedure(Sound: RobotSoundHandle; Value: Single); stdcall;
+ 
+-  TRobotSoundGetValue = function(Sound: TSoundBufferControl): Single; stdcall;
++  TRobotSoundGetValue = function(Sound: RobotSoundHandle): Single; stdcall;
+ 
+   TRobotRenderText =
+       procedure(
+-          Text: PWideChar;
+-          FontName: PWideChar;
++          Text: PEngineChar;
++          FontName: PEngineChar;
+           Color: Cardinal;
+           Width: Integer;
+           Height: Integer;
+@@ -123,15 +130,17 @@ type
+ 
+   TRobotRun =
+       function(
+-          Instance: Cardinal;
+-          Window: Cardinal;
+-          MapName: PWideChar;
++          // Handles are pointer-sized: HINSTANCE/HWND on Windows, and the
++          // engine's own HWND typedef is a pointer on Unix too.
++          Instance: NativeInt;
++          Window: NativeInt;
++          MapName: PEngineChar;
+           Settings: PRobotDisplaySettings;
+-          Language: PWideChar;
+-          StartText: PWideChar;
+-          WinText: PWideChar;
+-          LossText: PWideChar;
+-          TerronName: PWideChar;
++          Language: PEngineChar;
++          StartText: PEngineChar;
++          WinText: PEngineChar;
++          LossText: PEngineChar;
++          TerronName: PEngineChar;
+           Statistics: PPlanetBattleStatistics
+       ): Integer; stdcall;
+ 
+@@ -199,35 +208,36 @@ var
+ 
+ function GetRobotMultiSampleIndex: Integer;
+ 
++
+ procedure InitializeRobotRuntime;
+ 
+ procedure FinalizeRobotRuntime;
+ 
+-procedure RobotPlaySound(Name: PWideChar); stdcall;
++procedure RobotPlaySound(Name: PEngineChar); stdcall;
+ 
+ function RobotCreateSound(
+-    Name: PWideChar;
++    Name: PEngineChar;
+     Group: Integer;
+     Looping: Integer
+-): TSoundBufferControl; stdcall;
++): RobotSoundHandle; stdcall;
+ 
+-procedure RobotFreeSound(Sound: TSoundBufferControl); stdcall;
++procedure RobotFreeSound(Sound: RobotSoundHandle); stdcall;
+ 
+-procedure RobotStartSound(Sound: TSoundBufferControl); stdcall;
++procedure RobotStartSound(Sound: RobotSoundHandle); stdcall;
+ 
+-function RobotIsSoundPlaying(Sound: TSoundBufferControl): Integer; stdcall;
++function RobotIsSoundPlaying(Sound: RobotSoundHandle): Integer; stdcall;
+ 
+-procedure RobotSetSoundVolume(Sound: TSoundBufferControl; Value: Single); stdcall;
++procedure RobotSetSoundVolume(Sound: RobotSoundHandle; Value: Single); stdcall;
+ 
+-procedure RobotSetSoundPan(Sound: TSoundBufferControl; Value: Single); stdcall;
++procedure RobotSetSoundPan(Sound: RobotSoundHandle; Value: Single); stdcall;
+ 
+-function RobotGetSoundVolume(Sound: TSoundBufferControl): Single; stdcall;
++function RobotGetSoundVolume(Sound: RobotSoundHandle): Single; stdcall;
+ 
+-function RobotGetSoundPan(Sound: TSoundBufferControl): Single; stdcall;
++function RobotGetSoundPan(Sound: RobotSoundHandle): Single; stdcall;
+ 
+ procedure RobotRenderText(
+-    Text: PWideChar;
+-    FontName: PWideChar;
++    Text: PEngineChar;
++    FontName: PEngineChar;
+     Color: Cardinal;
+     Width: Integer;
+     Height: Integer;
+@@ -292,6 +302,75 @@ begin
+   Result := 0;
+ end;
+ 
++// Library names the engine is shipped under, most specific first.
++const
++  BattleEngineWinName = 'MatrixGame.dll';
++  BattleEngineUnixName = 'MatrixGame.so';
++
++// Locate and load the battle engine. Windows finds MatrixGame.dll through the
++// loader search path. On Unix FPC does not translate a .dll name into a .so, so
++// the executable's own directory and the current one are spelled out.
++function LoadBattleEngine(const OverrideName: WideString): TLibHandle;
++const
++  MaxNames = 6;
++var
++  Index: Integer;
++  Names: array of WideString;
++
++  function HasPath(const Name: WideString): Boolean;
++  begin
++    Result := (Pos('/', Name) > 0) or (Pos('\', Name) > 0);
++  end;
++
++  procedure AddName(const Candidate: WideString);
++  var
++    Duplicate: Integer;
++  begin
++    if Candidate = '' then
++      Exit;
++    for Duplicate := 0 to High(Names) do
++      if Names[Duplicate] = Candidate then
++        Exit;
++    SetLength(Names, Length(Names) + 1);
++    Names[High(Names)] := Candidate;
++  end;
++
++begin
++  Result := 0;
++  SetLength(Names, 0);
++  if OverrideName <> '' then
++  begin
++    AddName(OverrideName);
++{$IFNDEF MSWINDOWS}
++    // The same override written for a Windows install still resolves here.
++    if HasPath(OverrideName) then
++      AddName(ChangeFileExt(OverrideName, '.so'))
++    else
++      AddName('./' + ChangeFileExt(OverrideName, '.so'));
++{$ENDIF}
++  end
++  else
++  begin
++{$IFDEF MSWINDOWS}
++    AddName(BattleEngineWinName);
++{$ELSE}
++    AddName(ExtractFilePath(ParamStr(0)) + BattleEngineUnixName);
++    AddName('./' + BattleEngineUnixName);
++    // Also accept a soname-style install next to the loader path.
++    AddName('lib' + BattleEngineUnixName);
++{$ENDIF}
++  end;
++  if Length(Names) > MaxNames then
++    SetLength(Names, MaxNames);
++  for Index := 0 to High(Names) do
++  begin
++    Result := LoadLibrary(UTF8Encode(Names[Index]));
++    if Result <> 0 then
++      Exit;
++  end;
++  Result := 0;
++end;
++
+ procedure InitializeRobotRuntime;
+ var
+   GetInterface: TGetRobotInterface;
+@@ -319,36 +398,49 @@ begin
+     RobotCallbacks.ReleaseTextures := RobotReleaseTextures;
+     RobotCallbacks.GetMusicVolume := RobotGetMusicVolume;
+     RobotCallbacks.SetMusicVolume := RobotSetMusicVolume;
+-{$IF Defined(MSWINDOWS) and Defined(CPU386)}
+-    if DirectXVersion >= $90000 then
++    // The battle engine is a drop-in for the original MatrixGame.dll, so the
++    // language config override wins, then the plain platform name.
++    if LanguageDataConfig.GetBlock('RobotsMap').CountParams('MatrixOverride') > 0 then
++      OverrideName := LanguageDataConfig.GetBlock('RobotsMap').GetParam('MatrixOverride')
++    else
++      OverrideName := '';
++    RobotModule := LoadBattleEngine(OverrideName);
++    if RobotModule <> 0 then
+     begin
+-      if LanguageDataConfig.GetBlock('RobotsMap').CountParams('MatrixOverride') > 0 then
++      GetInterface := GetProcAddress(RobotModule, 'GetRobotInterface');
++      if GetInterface = nil then
+       begin
+-        OverrideName := LanguageDataConfig.GetBlock('RobotsMap').GetParam('MatrixOverride');
+-        RobotModule := LoadLibrary(UTF8Encode(OverrideName));
++        FreeLibrary(RobotModule);
++        RobotModule := 0;
+       end
+       else
+-        RobotModule := LoadLibrary('MatrixGame.dll');
+-      if RobotModule <> 0 then
+-      begin
+-        GetInterface := GetProcAddress(RobotModule, 'GetRobotInterface');
+-        if GetInterface() = nil then
++      try
++        RobotInterface := GetInterface();
++        if RobotInterface = nil then
+         begin
+           FreeLibrary(RobotModule);
+           RobotModule := 0;
+         end
+         else
+         begin
+-          RobotInterface := GetInterface();
+           RobotInterface.Initialize(@RobotCallbacks);
+-          AppendLogLineThreadSafe('Load MatrixGame.dll .... ok');
++          AppendLogLineThreadSafe('Load planetary battle engine .... ok');
+           AppendLogLineThreadSafe(
+               AnsiString('Robot.Support()=' + IntToWideString(RobotInterface.Support()))
+           );
+         end;
++      except
++        on E: Exception do
++        begin
++          AppendLogLineThreadSafe('Planetary battle engine rejected: ' + E.Message);
++          RobotInterface := nil;
++          FreeLibrary(RobotModule);
++          RobotModule := 0;
++        end;
+       end;
+-    end;
+-{$ENDIF}
++    end
++    else if OverrideName <> '' then
++      AppendLogLineThreadSafe('Planetary battle engine not found: ' + OverrideName);
+   end;
+ end;
+ 
+@@ -366,67 +458,73 @@ begin
+   end;
+ end;
+ 
+-procedure RobotPlaySound(Name: PWideChar); stdcall;
++procedure RobotPlaySound(Name: PEngineChar); stdcall;
+ begin
+-  SoundManager.PlaySound(WideString(Name));
++  SoundManager.PlaySound(EngineText(Name));
+ end;
+ 
+-function RobotCreateSound(Name: PWideChar; Group, Looping: Integer): TSoundBufferControl; stdcall;
++function RobotCreateSound(Name: PEngineChar; Group, Looping: Integer): RobotSoundHandle; stdcall;
+ var
+   Sound: TSoundBufferControl;
+ begin
+   Sound := TSoundBufferControl.Create;
+   if RobotSound then
+-    Sound.Configure(WideString(Name), Group, Looping <> 0);
+-  Result := Sound;
++    Sound.Configure(EngineText(Name), Group, Looping <> 0);
++  Result := RobotSoundHandle(Sound);
+ end;
+ 
+-procedure RobotFreeSound(Sound: TSoundBufferControl); stdcall;
++// Handles come from the engine and are only ever what RobotCreateSound returned.
++function SoundHandleOf(Value: RobotSoundHandle): TSoundBufferControl; inline;
+ begin
+-  if Sound <> nil then
+-    Sound.Free;
++  Result := TSoundBufferControl(Value);
+ end;
+ 
+-procedure RobotStartSound(Sound: TSoundBufferControl); stdcall;
++procedure RobotFreeSound(Sound: RobotSoundHandle); stdcall;
+ begin
+-  if Sound <> nil then
++  if Sound <> 0 then
++    SoundHandleOf(Sound).Free;
++end;
++
++procedure RobotStartSound(Sound: RobotSoundHandle); stdcall;
++begin
++  if Sound <> 0 then
+     if RobotSound then
+-      Sound.Play;
++      SoundHandleOf(Sound).Play;
+ end;
+ 
+-function RobotIsSoundPlaying(Sound: TSoundBufferControl): Integer; stdcall;
++function RobotIsSoundPlaying(Sound: RobotSoundHandle): Integer; stdcall;
+ begin
+   Result := 0;
+-  if Sound <> nil then
+-    Result := Integer(Sound.IsPlaying);
++  if Sound <> 0 then
++    Result := Integer(SoundHandleOf(Sound).IsPlaying);
+ end;
+ 
+-procedure RobotSetSoundVolume(Sound: TSoundBufferControl; Value: Single); stdcall;
++procedure RobotSetSoundVolume(Sound: RobotSoundHandle; Value: Single); stdcall;
+ begin
+-  if Sound <> nil then
+-    Sound.SetVolume(Value);
++  if Sound <> 0 then
++    SoundHandleOf(Sound).SetVolume(Value);
+ end;
+ 
+-procedure RobotSetSoundPan(Sound: TSoundBufferControl; Value: Single); stdcall;
++procedure RobotSetSoundPan(Sound: RobotSoundHandle; Value: Single); stdcall;
+ begin
+-  if Sound <> nil then
+-    Sound.SetPan(Value);
++  if Sound <> 0 then
++    SoundHandleOf(Sound).SetPan(Value);
+ end;
+ 
+-function RobotGetSoundVolume(Sound: TSoundBufferControl): Single; stdcall;
++function RobotGetSoundVolume(Sound: RobotSoundHandle): Single; stdcall;
+ begin
+-  if Sound = nil then
++  if Sound = 0 then
+     Result := 0
+   else
+-    Result := Sound.Volume;
++    Result := SoundHandleOf(Sound).Volume;
+ end;
+ 
+-function RobotGetSoundPan(Sound: TSoundBufferControl): Single; stdcall;
++function RobotGetSoundPan(Sound: RobotSoundHandle): Single; stdcall;
+ begin
+-  if Sound = nil then
++  if Sound = 0 then
+     Result := 0
+   else
+-    Result := Sound.Pan;
++    Result := SoundHandleOf(Sound).Pan;
+ end;
+ 
+ function CenterSpan(SpanStart, SpanEnd, ContentStart, ContentEnd: Integer): Integer; inline;
+@@ -435,7 +533,7 @@ begin
+ end;
+ 
+ procedure RobotRenderText(
+-    Text, FontName: PWideChar;
++    Text, FontName: PEngineChar;
+     Color: Cardinal;
+     Width, Height, AlignX, AlignY, Wrap, OffsetX, OffsetY: Integer;
+     Clip: PRect;
+@@ -520,10 +618,10 @@ begin
+   WrappedLines := nil;
+   try
+     Lines := TStringsEC.Create;
+-    Lines.SetText(WideString(Text));
++    Lines.SetText(EngineText(Text));
+     Control := TCFontControlEC.Create;
+     GlobalCache.ResetControl(Control);
+-    Control.SetCacheKey(WideString(FontName));
++    Control.SetCacheKey(EngineText(FontName));
+     Font := AcquireCachedFont(Control);
+     Font.ResetTextMeasureState;
+     Font.UseARGBColors := True;
+@@ -749,6 +847,9 @@ var
+   Failed: Boolean;
+   CursorState: TCursorStateGI;
+   Memory: TMemoryStatusEx;
++  // Engine-width copies of the strings handed to Run(); they must outlive the call.
++  MapBuf, LangBuf, StartBuf, WinBuf, LossBuf, PlanetBuf: TEngineCharArray;
++  LangName: WideString;
+ begin
+   if MusicEnabled and MusicManager.HasSelectedMusic then
+     MusicManager.RequestFadeOut;
+@@ -831,33 +932,31 @@ begin
+       if RobotInterface <> nil then
+       begin
+         if LanguageDataConfig.GetBlock('RobotsMap').CountParams('CfgOverride') > 0 then
+-          Result :=
+-              RobotInterface.Run(
+-                  HInstance,
+-                  MainWindowHandle,
+-                  PWideChar(MapName),
+-                  @RobotSettings,
+-                  PWideChar(LanguageDataConfig.GetBlock('RobotsMap').GetParam('CfgOverride')),
+-                  PWideChar(StartText),
+-                  PWideChar(WinText),
+-                  PWideChar(LossText),
+-                  PWideChar(TerronName),
+-                  @RobotBattleStatistics
+-              )
++          LangName := LanguageDataConfig.GetBlock('RobotsMap').GetParam('CfgOverride')
+         else
+-          Result :=
+-              RobotInterface.Run(
+-                  HInstance,
+-                  MainWindowHandle,
+-                  PWideChar(MapName),
+-                  @RobotSettings,
+-                  PWideChar(LanguageInstallConfig.GetParam('Lang')),
+-                  PWideChar(StartText),
+-                  PWideChar(WinText),
+-                  PWideChar(LossText),
+-                  PWideChar(TerronName),
+-                  @RobotBattleStatistics
+-              );
++          LangName := LanguageInstallConfig.GetParam('Lang');
++        MapBuf := EngineBuffer(MapName);
++        LangBuf := EngineBuffer(LangName);
++        StartBuf := EngineBuffer(StartText);
++        WinBuf := EngineBuffer(WinText);
++        LossBuf := EngineBuffer(LossText);
++        PlanetBuf := EngineBuffer(TerronName);
++        // Run() blocks for the whole battle, so this process can no longer
++        // process the focus change that would release its own input grab.
++        ReleaseGameWindowInput;
++        Result :=
++            RobotInterface.Run(
++                HInstance,
++                MainWindowHandle,
++                PEngineChar(@MapBuf[0]),
++                @RobotSettings,
++                PEngineChar(@LangBuf[0]),
++                PEngineChar(@StartBuf[0]),
++                PEngineChar(@WinBuf[0]),
++                PEngineChar(@LossBuf[0]),
++                PEngineChar(@PlanetBuf[0]),
++                @RobotBattleStatistics
++            );
+       end;
+     except
+       on E: Exception do

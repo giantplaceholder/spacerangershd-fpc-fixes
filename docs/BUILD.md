@@ -79,7 +79,7 @@ cp spacerangershd-fpc-fixes/*.patch SpaceRangersHD_FPC/
 
 ```
 cd SpaceRangersHD_FPC
-for p in {01..15}-*.patch; do git apply "$p" || break; done
+for p in {01..17}-*.patch; do git apply "$p" || break; done
 ```
 
 4) Build binaries:
