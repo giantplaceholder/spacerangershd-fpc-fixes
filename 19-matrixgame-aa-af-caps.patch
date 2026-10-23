@@ -1,0 +1,28 @@
+--- a/platform/GameGraphics.pas	2026-10-23 12:44:33.419420483 +0000
++++ b/platform/GameGraphics.pas	2026-10-23 12:44:33.455420485 +0000
+@@ -1260,8 +1260,14 @@
+ begin
+   if QualityLevels <> nil then
+     QualityLevels^ := 0;
+-  if MultiSample = 0 then
+-    Result := 0
++  // the battle can do these. the menu only lists what we accept
++  if (MultiSample = 0) or (MultiSample = 2) or (MultiSample = 4)
++      or (MultiSample = 8) or (MultiSample = 16) then
++  begin
++    if QualityLevels <> nil then
++      QualityLevels^ := 1;
++    Result := 0;
++  end
+   else
+     Result := -2147467263;
+ end;
+@@ -1309,7 +1315,7 @@
+   if Caps.MaxTextureHeight = 0 then
+     Caps.MaxTextureHeight := 16384;
+   Caps.MaxTextureAspectRatio := Max(Caps.MaxTextureWidth, Caps.MaxTextureHeight);
+-  Caps.MaxAnisotropy := 1;
++  Caps.MaxAnisotropy := 16;
+   Result := 0;
+ end;
+ function TSDLGraphics.GetAdapterMonitor(Adapter: Cardinal): Cardinal;
