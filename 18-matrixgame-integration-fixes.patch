@@ -1,0 +1,154 @@
+diff --git a/platform/GameWindow.pas b/platform/GameWindow.pas
+index 0a3fd12..402e8f9 100644
+--- a/platform/GameWindow.pas
++++ b/platform/GameWindow.pas
+@@ -28,6 +28,7 @@ procedure GetGameMouse(out Point: TPoint);
+ procedure WarpGameMouse(X, Y: Integer);
+ procedure ConfineGameMouse;
+ procedure ReleaseGameWindowInput;
++procedure RestoreGameWindowAfterBattle;
+ procedure ApplyIntegerScale;
+ procedure GameOutputSize(out W, H: Integer);
+ function ShowGameCursor(Show: Boolean): Integer;
+@@ -821,6 +822,23 @@ begin
+   SDL_SetWindowGrab(GameSDLWindow, 0);
+ end;
+ 
++procedure RestoreGameWindowAfterBattle;
++var
++  Flags: Cardinal;
++begin
++  // battle cleared the mouse rect, put our window back before the reset
++  if GameSDLWindow = nil then
++    Exit;
++  SDL_ShowWindow(GameSDLWindow);
++  SDL_RestoreWindow(GameSDLWindow);
++  SDL_RaiseWindow(GameSDLWindow);
++  Flags := 0;
++  if not GameWindowed then
++    Flags := SDL_WINDOW_FULLSCREEN_DESKTOP;
++  SDL_SetWindowFullscreen(GameSDLWindow, Flags);
++  ConfineGameMouse;
++end;
++
+ procedure WarpGameMouse(X, Y: Integer);
+ var
+   OffsetX, OffsetY: Integer;
+diff --git a/source/game/Robot.pas b/source/game/Robot.pas
+index f3e4338..44d348e 100644
+--- a/source/game/Robot.pas
++++ b/source/game/Robot.pas
+@@ -974,6 +974,7 @@ begin
+         Failed := True;
+     end;
+     RobotBattleActive := False;
++    RestoreGameWindowAfterBattle;
+     AppendLogLineThreadSafe('Planetary battle finished');
+     GR_DXReset;
+     SetGameWindowTitle('Rangers');
+diff --git a/source/game/aSaveLoad.pas b/source/game/aSaveLoad.pas
+index ffbb82d..6dbaf40 100644
+--- a/source/game/aSaveLoad.pas
++++ b/source/game/aSaveLoad.pas
+@@ -42,7 +42,7 @@ var
+ 
+   MemorySnapshotXorSeed: Integer;
+ 
+-  MemorySnapshotGalaxyToken: Cardinal;
++  MemorySnapshotGalaxyToken: PtrUInt;
+ 
+ function SaveGameToFile(FileName: WideString; Description: WideString): Boolean;
+ 
+@@ -585,7 +585,7 @@ begin
+   MemorySnapshotBuffer.ApplyDatXorCipher(MemorySnapshotXorSeed);
+   GetPlayer.SetMoney(0);
+   Galaxy.ObfuscateProtectedState;
+-  MemorySnapshotGalaxyToken := Cardinal(Galaxy) + $17557455;
++  MemorySnapshotGalaxyToken := PtrUInt(Galaxy) + PtrUInt($17557455);
+   Galaxy := nil;
+   BlazerShip := nil;
+   KellerShip := nil;
+@@ -602,7 +602,7 @@ var
+   Loop: TMessageLoopGI;
+ begin
+   ReopenScreen := True;
+-  Galaxy := TGalaxy(MemorySnapshotGalaxyToken - $17557455);
++  Galaxy := TGalaxy(MemorySnapshotGalaxyToken - PtrUInt($17557455));
+   Galaxy.RestoreProtectedState;
+   if DominatorSpawnPlanet <> nil then
+   begin
+diff --git a/source/screens/fGov.pas b/source/screens/fGov.pas
+index f820be7..1311ebf 100644
+--- a/source/screens/fGov.pas
++++ b/source/screens/fGov.pas
+@@ -585,6 +585,13 @@ begin
+     begin
+       Stage := 13;
+       MapIndex := FindRobotMapById(PlanetBattleMapId);
++      if (MapIndex < 0) or (MapIndex > High(RobotMapDefinitions)) or (GetPlayer = nil) or (Galaxy = nil) then
++      begin
++        AppendLogLineThreadSafe('Planetary battle loss could not be applied');
++        PendingTransition := 0;
++      end
++      else
++      begin
+       Money :=
+           RoundAndTruncateToTens(
+               Min(
+@@ -628,11 +635,19 @@ begin
+         DateTurn := Galaxy.CurrentTurn;
+       end;
+       GetPlayer.LastPlanetBattleTurn := Galaxy.CurrentTurn;
++      end;
+     end
+     else if PendingTransition = 3 then
+     begin
+       Stage := 17;
+       MapIndex := FindRobotMapById(PlanetBattleMapId);
++      if (MapIndex < 0) or (MapIndex > High(RobotMapDefinitions)) or (GetPlayer = nil) or (Galaxy = nil) then
++      begin
++        AppendLogLineThreadSafe('Planetary battle win could not be applied');
++        PendingTransition := 0;
++      end
++      else
++      begin
+       Money :=
+           RoundAndTruncateToTens(
+               Max(GetPlayer.Wealth * 0.03, Galaxy.ComputeScaledBigMoney(oiHuman))
+@@ -692,6 +707,8 @@ begin
+       Inc(GetPlayer.PlanetBattles);
+       TryAddAchievementProgress('IRONMAN', 1);
+       Stage := 23;
++      if LoadRobotScreen <> nil then
++      begin
+       LoadRobotScreen.LoadCompletionData;
+       if GovernmentBattleDifficulty = 1 then
+         LoadRobotScreen
+@@ -700,10 +717,19 @@ begin
+         LoadRobotScreen
+             .RecordCompletion(PlanetBattleMapId, -RobotBattleStatistics.SignedTimeMs div 1000, 1);
+       LoadRobotScreen.SaveCompletionData;
++      end;
++      end;
+     end
+     else if PendingTransition = 4 then
+     begin
+       Stage := 24;
++      if (GetPlayer = nil) or (Galaxy = nil) or (GetPlayer.CurrentPlanet = nil) then
++      begin
++        AppendLogLineThreadSafe('Planetary battle surrender could not be applied');
++        PendingTransition := 0;
++      end
++      else
++      begin
+       GetPlayer.CurrentPlanet.SetRelationLevelToRanger(GetPlayer, rlBad);
+       DialogText :=
+           PickLocalizedTextVariant(
+@@ -743,6 +769,7 @@ begin
+         DateTurn := Galaxy.CurrentTurn;
+       end;
+       GetPlayer.LastPlanetBattleTurn := Galaxy.CurrentTurn;
++      end;
+     end;
+     Stage := 26;
+     if PendingTransition = 0 then
